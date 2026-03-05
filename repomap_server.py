@@ -128,8 +128,13 @@ async def repo_map(
         if not chat_files_list and not effective_other_files:
             return {"map": "No files found to generate a map."}
 
-        abs_chat = [str(root_path / f) for f in chat_files_list if _validate_path_containment(f, root_str)]
-        abs_other = [str(root_path / f) for f in effective_other_files if _validate_path_containment(f, root_str)]
+        def _to_abs(f: str) -> str:
+            """Convert to absolute path, handling both relative and already-absolute paths."""
+            p = Path(f)
+            return str(p if p.is_absolute() else root_path / f)
+
+        abs_chat = [_to_abs(f) for f in chat_files_list if _validate_path_containment(f, root_str)]
+        abs_other = [_to_abs(f) for f in effective_other_files if _validate_path_containment(f, root_str)]
         abs_chat_set = set(abs_chat)
         abs_other = [f for f in abs_other if f not in abs_chat_set]
 
