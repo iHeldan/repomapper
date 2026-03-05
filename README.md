@@ -18,25 +18,25 @@ The result: an AI agent gets structural understanding of a 1000+ file codebase i
 ```
 $ python repomap.py /path/to/project --map-tokens 2048
 
-server/services/CategoryService.ts:
+server/services/ProductService.ts:
 (Rank value: 1.0000)
 
-  │export class CategoryService {
-  █  private readonly categoryRepo: CategoryRepository
-  │  async getCategoryTree(): Promise<CategoriesResponse> {
-  █    const categories = await this.categoryRepo.getActiveCategories()
+  │export class ProductService {
+  █  private readonly productRepo: ProductRepository
+  │  async getProductTree(): Promise<ProductsResponse> {
+  █    const products = await this.productRepo.getActiveProducts()
   ⋮
-  │  private buildTree(categories: CategoryRow[]): CategoryTreeNode[] {
+  │  private buildTree(products: ProductRow[]): ProductTreeNode[] {
 
-app/components/PricingFields.vue:
+app/components/FilterPanel.vue:
 (Rank value: 0.8542)
 
   │<script setup lang="ts">
   │interface Props {
-  █  saleMethod: 'auction' | 'buy-now'
+  █  mode: 'grid' | 'list'
   ⋮
-  │function handleStartingPriceChange(value: string | number): void {
-  █  const price = parsePrice(value)
+  │function handleFilterChange(value: string | number): void {
+  █  const parsed = parseFilter(value)
 ```
 
 ## Fork changes
