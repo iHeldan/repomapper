@@ -369,7 +369,7 @@ class RepoMap:
         references = defaultdict(set)
 
         # R4 Finding B1-F2: Pre-compute rel_fname once per file to avoid redundant Path operations
-        all_fnames = list(set(chat_fnames + other_fnames))
+        all_fnames = list(dict.fromkeys(chat_fnames + other_fnames))
         abs_to_rel: Dict[str, str] = {f: self.get_rel_fname(f) for f in all_fnames}
 
         personalization = {}
@@ -592,11 +592,24 @@ class RepoMap:
         # R3 Finding B1-1: Hoist grouping/sorting out of binary search loop
         sorted_files_with_tags = self._group_and_sort_tags_by_file(ranked_tags)
 
+        # Filter out files whose individual tree exceeds the token limit
+        fitting_files = []
+        for entry in sorted_files_with_tags:
+            rel_fname, file_tag_list = entry
+            lois = [tag.line for _, tag in file_tag_list]
+            abs_fname = str(self.root / rel_fname)
+            rendered = self.render_tree(abs_fname, rel_fname, lois)
+            if rendered and self.token_count(rendered) <= max_map_tokens:
+                fitting_files.append(entry)
+
+        if not fitting_files:
+            return None, file_report
+
         def try_files(num_files: int) -> Tuple[Optional[str], int]:
             if num_files <= 0:
                 return None, 0
 
-            selected_files = sorted_files_with_tags[:num_files]
+            selected_files = fitting_files[:num_files]
             tree_output = self.to_tree(selected_files)
 
             if not tree_output:
@@ -606,7 +619,7 @@ class RepoMap:
             return tree_output, tokens
 
         # Binary search for optimal number of files (start at 1; try_files(0) is always None)
-        left, right = 1, len(sorted_files_with_tags)
+        left, right = 1, len(fitting_files)
         best_tree = None
 
         while left <= right:
