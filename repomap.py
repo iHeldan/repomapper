@@ -8,33 +8,11 @@ Uses Tree-sitter for parsing and PageRank for ranking importance.
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import List
 
-from utils import count_tokens, read_text, Tag
-from scm import get_scm_fname
-from importance import is_important, filter_important_files
+from utils import count_tokens, read_text, find_src_files
 from repomap_class import RepoMap
-
-
-def find_src_files(directory: str) -> List[str]:
-    """Find source files in a directory."""
-    if not os.path.isdir(directory):
-        return [directory] if os.path.isfile(directory) else []
-    
-    src_files = []
-    for root, dirs, files in os.walk(directory):
-        # Skip hidden directories and common non-source directories
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'node_modules', '__pycache__', 'venv', 'env'}]
-        
-        for file in files:
-            if not file.startswith('.'):
-                full_path = os.path.join(root, file)
-                src_files.append(full_path)
-    
-    return src_files
 
 
 def tool_output(*messages):
@@ -177,8 +155,9 @@ Examples:
     # other_files for RepoMap are the effective_other_files, resolved after expansion.
     other_files = [str(Path(f).resolve()) for f in effective_other_files_unresolved]
 
-    print(f"Chat files: {chat_files}")
-    
+    if args.verbose:
+        tool_output(f"Chat files: {chat_files}")
+
     # Convert mentioned files to sets
     mentioned_fnames = set(args.mentioned_files) if args.mentioned_files else None
     mentioned_idents = set(args.mentioned_idents) if args.mentioned_idents else None
@@ -197,19 +176,22 @@ Examples:
     
     # Generate the map
     try:
-        map_content = repo_map.get_repo_map(
+        map_content, file_report = repo_map.get_repo_map(
             chat_files=chat_files,
             other_files=other_files,
             mentioned_fnames=mentioned_fnames,
             mentioned_idents=mentioned_idents,
             force_refresh=args.force_refresh
         )
-        
+
         if map_content:
             if args.verbose:
                 tokens = repo_map.token_count(map_content)
                 tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
-            
+                tool_output(f"Files considered: {file_report.total_files_considered}, "
+                           f"Definitions: {file_report.definition_matches}, "
+                           f"References: {file_report.reference_matches}")
+
             print(map_content)
         else:
             tool_output("No repository map generated.")

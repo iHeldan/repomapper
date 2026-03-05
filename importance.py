@@ -37,10 +37,10 @@ def is_important(rel_file_path: str) -> bool:
     file_name = os.path.basename(normalized_path)
     dir_name = os.path.dirname(normalized_path)
 
-    # Check specific directory patterns
-    for important_dir, checker_func in IMPORTANT_DIR_PATTERNS.items():
-        if dir_name == important_dir and checker_func(file_name):
-            return True
+    # R2 Finding B2-4: O(1) dict lookup instead of O(N) loop
+    checker_func = IMPORTANT_DIR_PATTERNS.get(dir_name)
+    if checker_func and checker_func(file_name):
+        return True
     
     # Check if the full normalized path is important
     if normalized_path in IMPORTANT_FILENAMES:

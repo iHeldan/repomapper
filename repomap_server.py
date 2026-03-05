@@ -1,28 +1,41 @@
 import asyncio
-import json
+import dataclasses
 import os
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Set
-import dataclasses
+from typing import List, Optional, Dict, Any
 
 from fastmcp import FastMCP, settings
 from repomap_class import RepoMap
-from utils import count_tokens, read_text
-from scm import get_scm_fname
-from importance import filter_important_files
+from utils import count_tokens, read_text, find_src_files
 
-# Helper function from your CLI, useful to have here
-def find_src_files(directory: str) -> List[str]:
-    if not os.path.isdir(directory):
-        return [directory] if os.path.isfile(directory) else []
-    src_files = []
-    for r, d, f_list in os.walk(directory):
-        d[:] = [d_name for d_name in d if not d_name.startswith('.') and d_name not in {'node_modules', '__pycache__', 'venv', 'env'}]
-        for f in f_list:
-            if not f.startswith('.'):
-                src_files.append(os.path.join(r, f))
-    return src_files
+# Security: only allow project roots under these directories (pre-resolved at module load)
+_ALLOWED_ROOTS = [
+    (Path.home() / "AI").resolve(),
+    (Path.home() / "Projects").resolve(),
+    (Path.home() / "Coding").resolve(),
+]
+
+def _check_project_root(project_root: str) -> Optional[Dict[str, str]]:
+    """Validate project_root exists and is within allowed directories. Returns error dict or None."""
+    if not os.path.isdir(project_root):
+        return {"error": f"Project root directory not found: {project_root}"}
+    resolved = Path(project_root).resolve()
+    for allowed in _ALLOWED_ROOTS:
+        try:
+            resolved.relative_to(allowed)
+            return None
+        except ValueError:
+            continue
+    return {"error": f"Project root '{project_root}' is outside allowed directories: {[str(a) for a in _ALLOWED_ROOTS]}"}
+
+def _validate_path_containment(file_path: str, root_str: str) -> bool:
+    """Check that file_path resolves to within root_str."""
+    abs_path = os.path.abspath(os.path.join(root_str, file_path))
+    return abs_path.startswith(root_str + os.sep) or abs_path == root_str
+
+# R3 Finding B2-1: Cache RepoMap instances for search_identifiers
+_REPO_MAP_CACHE: Dict[str, Any] = {}
 
 # Configure logging - only show errors
 root_logger = logging.getLogger()
@@ -80,15 +93,14 @@ async def repo_map(
     :returns: A dictionary containing:
         - 'map': the generated repository map string
         - 'report': a dictionary with file processing details including:
-            - 'included': list of processed files
             - 'excluded': dictionary of excluded files with reasons
             - 'definition_matches': count of matched definitions
             - 'reference_matches': count of matched references
             - 'total_files_considered': total files processed
         Or an 'error' key if an error occurred.
     """
-    if not os.path.isdir(project_root):
-        return {"error": f"Project root directory not found: {project_root}"}
+    if error := _check_project_root(project_root):
+        return error
 
     # 1. Handle and validate parameters
     # Convert token_limit to integer with fallback
@@ -105,35 +117,22 @@ async def repo_map(
     mentioned_fnames_set = set(mentioned_files) if mentioned_files else None
     mentioned_idents_set = set(mentioned_idents) if mentioned_idents else None
 
-    # 2. If a specific list of other_files isn't provided, scan the whole root directory.
-    # This should happen regardless of whether chat_files are present.
-    effective_other_files = []
-    if other_files:
-        effective_other_files = other_files
-    else:
-        log.info("No other_files provided, scanning root directory for context...")
-        effective_other_files = find_src_files(project_root)
-
-    # Add a print statement for debugging so you can see what the tool is working with.
-    log.debug(f"Chat files: {chat_files_list}")
-    log.debug(f"Effective other_files count: {len(effective_other_files)}")
-
-    # If after all that we have no files, we can exit early.
-    if not chat_files_list and not effective_other_files:
-        log.info("No files to process.")
-        return {"map": "No files found to generate a map."}
-
-    # 3. Resolve paths relative to project root
     root_path = Path(project_root).resolve()
-    abs_chat_files = [str(root_path / f) for f in chat_files_list]
-    abs_other_files = [str(root_path / f) for f in effective_other_files]
-    
-    # Remove any chat files from the other_files list to avoid duplication
-    abs_chat_files_set = set(abs_chat_files)
-    abs_other_files = [f for f in abs_other_files if f not in abs_chat_files_set]
 
-    # 4. Instantiate and run RepoMap
-    try:
+    # R2 Finding #2: move all blocking I/O (file discovery + RepoMap) into thread
+    root_str = str(root_path)
+
+    def _prepare_and_run():
+        effective_other_files = other_files if other_files is not None else find_src_files(project_root)
+
+        if not chat_files_list and not effective_other_files:
+            return {"map": "No files found to generate a map."}
+
+        abs_chat = [str(root_path / f) for f in chat_files_list if _validate_path_containment(f, root_str)]
+        abs_other = [str(root_path / f) for f in effective_other_files if _validate_path_containment(f, root_str)]
+        abs_chat_set = set(abs_chat)
+        abs_other = [f for f in abs_other if f not in abs_chat_set]
+
         repo_mapper = RepoMap(
             map_tokens=token_limit,
             root=str(root_path),
@@ -144,31 +143,25 @@ async def repo_map(
             exclude_unranked=exclude_unranked,
             max_context_window=max_context_window
         )
-    except Exception as e:
-        log.exception(f"Failed to initialize RepoMap for project '{project_root}': {e}")
-        return {"error": f"Failed to initialize RepoMap: {str(e)}"}
 
-    try:
-        map_content, file_report = await asyncio.to_thread(
-            repo_mapper.get_repo_map,
-            chat_files=abs_chat_files,
-            other_files=abs_other_files,
+        map_content, file_report = repo_mapper.get_repo_map(
+            chat_files=abs_chat,
+            other_files=abs_other,
             mentioned_fnames=mentioned_fnames_set,
             mentioned_idents=mentioned_idents_set,
             force_refresh=force_refresh
         )
-        
-        # Convert FileReport to dictionary for JSON serialization
-        report_dict = {
-            "excluded": file_report.excluded,
-            "definition_matches": file_report.definition_matches,
-            "reference_matches": file_report.reference_matches,
-            "total_files_considered": file_report.total_files_considered
-        }
+        return map_content, file_report
+
+    try:
+        result = await asyncio.to_thread(_prepare_and_run)
+        if isinstance(result, dict):
+            return result
+        map_content, file_report = result
         
         return {
             "map": map_content or "No repository map could be generated.",
-            "report": report_dict
+            "report": dataclasses.asdict(file_report)
         }
     except Exception as e:
         log.exception(f"Error generating repository map for project '{project_root}': {e}")
@@ -198,62 +191,60 @@ async def search_identifiers(
     Returns:
         Dictionary containing search results or error message
     """
-    if not os.path.isdir(project_root):
-        return {"error": f"Project root directory not found: {project_root}"}
+    if error := _check_project_root(project_root):
+        return error
 
-    try:
-        # Initialize RepoMap with search-specific settings
-        repo_map = RepoMap(
-            root=project_root,
-            token_counter_func=lambda text: count_tokens(text, "gpt-4"),
-            file_reader_func=read_text,
-            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error},
-            verbose=False,
-            exclude_unranked=True
-        )
+    # Finding #1: run blocking work in thread to avoid freezing async event loop
+    def _run_search():
+        # R3 Finding B2-1: Reuse cached RepoMap to preserve _local_tags_cache
+        if project_root not in _REPO_MAP_CACHE:
+            _REPO_MAP_CACHE[project_root] = RepoMap(
+                root=project_root,
+                token_counter_func=lambda text: count_tokens(text, "gpt-4"),
+                file_reader_func=read_text,
+                output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error},
+                verbose=False,
+                exclude_unranked=True
+            )
+        repo_map = _REPO_MAP_CACHE[project_root]
 
-        # Find all source files in the project
-        all_files = find_src_files(project_root)
-        
-        # Get all tags (definitions and references) for all files
-        all_tags = []
-        for file_path in all_files:
-            rel_path = str(Path(file_path).relative_to(project_root))
-            tags = repo_map.get_tags(file_path, rel_path)
-            all_tags.extend(tags)
+        # R4 Finding B2-F1: Build and cache project-wide tags index on first search
+        if not hasattr(repo_map, '_project_tags_index'):
+            all_files = find_src_files(project_root)
+            all_tags = []
+            for file_path in all_files:
+                rel_path = str(Path(file_path).relative_to(project_root))
+                tags = repo_map.get_tags(file_path, rel_path)
+                all_tags.extend(tags)
+            repo_map._project_tags_index = all_tags
+        all_tags = repo_map._project_tags_index
 
-        # Filter tags based on search query and options
         matching_tags = []
         query_lower = query.lower()
-        
+
         for tag in all_tags:
             if query_lower in tag.name.lower():
                 if (tag.kind == "def" and include_definitions) or \
                    (tag.kind == "ref" and include_references):
                     matching_tags.append(tag)
 
-        # Sort by relevance (definitions first, then references)
         matching_tags.sort(key=lambda x: (x.kind != "def", x.name.lower().find(query_lower)))
-
-        # Limit results
         matching_tags = matching_tags[:max_results]
 
-        # Format results with context
         results = []
         for tag in matching_tags:
             file_path = str(Path(project_root) / tag.rel_fname)
-            
-            # Calculate context range based on context_lines parameter
+
             start_line = max(1, tag.line - context_lines)
             end_line = tag.line + context_lines
             context_range = list(range(start_line, end_line + 1))
-            
+
             context = repo_map.render_tree(
                 file_path,
                 tag.rel_fname,
                 context_range
             )
-            
+
             if context:
                 results.append({
                     "file": tag.rel_fname,
@@ -265,6 +256,8 @@ async def search_identifiers(
 
         return {"results": results}
 
+    try:
+        return await asyncio.to_thread(_run_search)
     except Exception as e:
         log.exception(f"Error searching identifiers in project '{project_root}': {e}")
         return {"error": f"Error searching identifiers: {str(e)}"}    
