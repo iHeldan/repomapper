@@ -9,13 +9,14 @@ from collections import namedtuple, defaultdict
 from typing import List, Dict, Set, Optional, Tuple, Callable
 import shutil
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import diskcache
 import networkx as nx
 from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
 from grep_ast import TreeContext
 from utils import count_tokens, read_text
 from scm import get_scm_fname
+from parser_support import resolve_parser_config, format_parser_runtime_error
 
 # Pre-import tree-sitter modules to avoid per-file import overhead (R1 Finding #7)
 try:
@@ -37,6 +38,7 @@ class FileReport:
     definition_matches: int         # Total definition tags
     reference_matches: int          # Total reference tags
     total_files_considered: int     # Total files provided as input
+    diagnostics: List[str] = field(default_factory=list)
 
 
 
@@ -91,6 +93,9 @@ class RepoMap:
         self.map_cache = {}
         self._query_cache = _GLOBAL_QUERY_CACHE   # R2: shared across instances
         self._local_tags_cache = {}               # Per-request (mtime could change between requests)
+        self._tag_failures = {}
+        self._uncacheable_tag_failures = set()
+        self.diagnostics = []
 
         # Load persistent tags cache
         self.load_tags_cache()
@@ -180,6 +185,11 @@ class RepoMap:
 
         # Cache miss or file changed
         tags = self.get_tags_raw(fname, rel_fname)
+
+        if fname in self._uncacheable_tag_failures:
+            self._uncacheable_tag_failures.discard(fname)
+            return tags
+
         cache_entry = {"mtime": file_mtime, "data": tags}
 
         try:
@@ -189,6 +199,23 @@ class RepoMap:
 
         self._local_tags_cache[fname] = cache_entry
         return tags
+
+    def _add_diagnostic(self, message: str):
+        """Store a de-duplicated runtime diagnostic for the current request."""
+        if message not in self.diagnostics:
+            self.diagnostics.append(message)
+
+    def _record_tag_failure(self, fname: str, message: str, *, cacheable: bool):
+        """Remember a per-file parse failure and whether it may be cached."""
+        self._tag_failures[fname] = message
+        self._add_diagnostic(message)
+        if not cacheable:
+            self._uncacheable_tag_failures.add(fname)
+
+    def _clear_tag_failure(self, fname: str):
+        """Clear a previously recorded parse failure for a file."""
+        self._tag_failures.pop(fname, None)
+        self._uncacheable_tag_failures.discard(fname)
 
     def _calculate_pagerank(self, graph: nx.MultiDiGraph, personalization: Dict[str, float]) -> Dict[str, float]:
         """Run PageRank with a pure-Python fallback when scipy/numpy is unavailable."""
@@ -204,15 +231,19 @@ class RepoMap:
     def get_tags_raw(self, fname: str, rel_fname: str) -> List[Tag]:
         """Parse file to extract tags using Tree-sitter."""
         if not _HAS_GREP_AST:
-            self.output_handlers['error']("grep-ast is required. Install with: pip install grep-ast")
+            message = "grep-ast is required. Install with: pip install grep-ast"
+            self._record_tag_failure(fname, message, cacheable=False)
+            self.output_handlers['error'](message)
             return []
 
         lang = filename_to_lang(fname)
         if not lang:
+            self._clear_tag_failure(fname)
             return []
 
         code = self.read_text_func_internal(fname)
         if not code:
+            self._clear_tag_failure(fname)
             return []
 
         # Vue SFC: tree-sitter-vue treats <script> as raw_text, so we
@@ -220,27 +251,33 @@ class RepoMap:
         if lang == "vue":
             return self._get_vue_tags(fname, rel_fname, code)
 
+        parser_lang, query_lang = resolve_parser_config(fname, lang)
+        scm_fname = get_scm_fname(query_lang)
+        if not scm_fname:
+            self._clear_tag_failure(fname)
+            return []
+
         try:
-            language = get_language(lang)
-            parser = get_parser(lang)
+            language = get_language(parser_lang)
+            parser = get_parser(parser_lang)
         except Exception as err:
-            self.output_handlers['error'](f"Skipping file {fname}: {err}")
+            message = format_parser_runtime_error(parser_lang, err)
+            self._record_tag_failure(fname, message, cacheable=False)
+            self.output_handlers['error'](f"Skipping file {fname}: {message}")
             return []
 
         try:
             tree = parser.parse(bytes(code, "utf-8"))
 
             # Use cached compiled query instead of re-reading SCM file per parse (Finding #2)
-            if lang not in self._query_cache:
-                scm_fname = get_scm_fname(lang)
-                if not scm_fname:
-                    return []
+            if parser_lang not in self._query_cache:
                 query_text = read_text(scm_fname, silent=True)
                 if not query_text:
+                    self._clear_tag_failure(fname)
                     return []
-                self._query_cache[lang] = Query(language, query_text)
+                self._query_cache[parser_lang] = Query(language, query_text)
 
-            query = self._query_cache[lang]
+            query = self._query_cache[parser_lang]
             cursor = QueryCursor(query)
             captures = cursor.captures(tree.root_node)
             
@@ -268,9 +305,12 @@ class RepoMap:
                         kind=kind
                     ))
             
+            self._clear_tag_failure(fname)
             return tags
             
         except Exception as e:
+            message = f"Failed to parse {rel_fname}: {e}"
+            self._record_tag_failure(fname, message, cacheable=True)
             self.output_handlers['error'](f"Error parsing {fname}: {e}")
             return []
 
@@ -305,7 +345,9 @@ class RepoMap:
             try:
                 language = get_language(parser_lang)
                 parser = get_parser(parser_lang)
-            except Exception:
+            except Exception as err:
+                message = format_parser_runtime_error(parser_lang, err)
+                self._record_tag_failure(fname, message, cacheable=False)
                 continue
 
             # Line offset: count newlines before script content starts
@@ -350,8 +392,12 @@ class RepoMap:
                             kind=kind
                         ))
             except Exception as e:
+                message = f"Failed to parse Vue script in {rel_fname}: {e}"
+                self._record_tag_failure(fname, message, cacheable=True)
                 self.output_handlers['error'](f"Error parsing Vue script in {fname}: {e}")
 
+        if all_tags:
+            self._clear_tag_failure(fname)
         return all_tags
 
     def get_ranked_tags(
@@ -364,7 +410,7 @@ class RepoMap:
         """Get ranked tags using PageRank algorithm with file report."""
         # Return empty list and empty report if no files
         if not chat_fnames and not other_fnames:
-            return [], FileReport({}, 0, 0, 0)
+            return [], FileReport({}, 0, 0, 0, [])
             
         if mentioned_fnames is None:
             mentioned_fnames = set()
@@ -402,6 +448,10 @@ class RepoMap:
             included.append(fname)
             
             tags = self.get_tags(fname, rel_fname)
+            failure_reason = self._tag_failures.get(fname)
+            if failure_reason:
+                excluded[fname] = failure_reason
+                continue
             
             for tag in tags:
                 if tag.kind == "def":
@@ -434,7 +484,7 @@ class RepoMap:
         G.add_edges_from(edges_to_add)
         
         if not G.nodes():
-            return [], FileReport(excluded, total_definitions, total_references, len(all_fnames))
+            return [], FileReport(excluded, total_definitions, total_references, len(all_fnames), list(self.diagnostics))
         
         # Run PageRank
         try:
@@ -452,7 +502,8 @@ class RepoMap:
             excluded=excluded,
             definition_matches=total_definitions,
             reference_matches=total_references,
-            total_files_considered=len(all_fnames)
+            total_files_considered=len(all_fnames),
+            diagnostics=list(self.diagnostics),
         )
         
         # Collect and rank tags
@@ -659,9 +710,13 @@ class RepoMap:
             chat_files = []
         if other_files is None:
             other_files = []
+
+        self.diagnostics = []
+        self._tag_failures = {}
+        self._uncacheable_tag_failures = set()
             
         # Create empty report for error cases
-        empty_report = FileReport({}, 0, 0, 0)
+        empty_report = FileReport({}, 0, 0, 0, [])
         
         if self.max_map_tokens <= 0 or not other_files:
             return None, empty_report
@@ -683,9 +738,11 @@ class RepoMap:
                 mentioned_fnames, mentioned_idents, force_refresh
             )
         except RecursionError:
-            self.output_handlers['error']("Disabling repo map, git repo too large?")
+            message = "Disabling repo map, git repo too large?"
+            self._add_diagnostic(message)
+            self.output_handlers['error'](message)
             self.max_map_tokens = 0
-            return None, FileReport({}, 0, 0, 0)  # Ensure consistent return type
+            return None, FileReport({}, 0, 0, 0, list(self.diagnostics))  # Ensure consistent return type
         
         if map_string is None:
             return None, file_report

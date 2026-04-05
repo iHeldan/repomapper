@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from fastmcp import FastMCP, settings
+from parser_support import infer_parser_languages, warm_languages, get_downloaded_parser_languages
 from repomap_class import RepoMap
 from utils import count_tokens, read_text, find_src_files, is_within_directory
 
@@ -48,7 +49,7 @@ def _get_project_state(file_paths: List[str]) -> tuple:
         except OSError:
             continue
         state.append((file_path, stat_result.st_mtime_ns, stat_result.st_size))
-    return tuple(sorted(state))
+    return tuple(sorted(state)), tuple(get_downloaded_parser_languages())
 
 # Configure logging - only show errors
 root_logger = logging.getLogger()
@@ -84,6 +85,7 @@ async def repo_map(
     token_limit: Any = 8192,  # Accept any type to handle empty strings
     exclude_unranked: bool = False,
     force_refresh: bool = False,
+    download_missing_parsers: bool = False,
     mentioned_files: Optional[List[str]] = None,
     mentioned_idents: Optional[List[str]] = None,
     verbose: bool = False,
@@ -99,6 +101,7 @@ async def repo_map(
     :param token_limit: The maximum number of tokens the generated repository map should occupy. Defaults to 8192.
     :param exclude_unranked: If True, files with a PageRank of 0.0 will be excluded from the map. Defaults to False.
     :param force_refresh: If True, forces a refresh of the repository map cache. Defaults to False.
+    :param download_missing_parsers: If True, attempts to download required parser runtimes before parsing files.
     :param mentioned_files: Optional list of file paths explicitly mentioned in the conversation and receive a mid-level ranking boost.
     :param mentioned_idents: Optional list of identifiers explicitly mentioned in the conversation, to boost their ranking.
     :param verbose: If True, enables verbose logging for the RepoMap generation process. Defaults to False.
@@ -151,6 +154,10 @@ async def repo_map(
         abs_chat_set = set(abs_chat)
         abs_other = [f for f in abs_other if f not in abs_chat_set]
 
+        warmup_result = None
+        if download_missing_parsers:
+            warmup_result = warm_languages(infer_parser_languages(abs_chat + abs_other))
+
         repo_mapper = RepoMap(
             map_tokens=token_limit,
             root=str(root_path),
@@ -169,6 +176,14 @@ async def repo_map(
             mentioned_idents=mentioned_idents_set,
             force_refresh=force_refresh
         )
+
+        if warmup_result:
+            if warmup_result.downloaded:
+                file_report.diagnostics.append(
+                    f"Downloaded parser runtimes: {', '.join(warmup_result.downloaded)}"
+                )
+            if warmup_result.error:
+                file_report.diagnostics.append(warmup_result.error)
         return map_content, file_report
 
     try:
@@ -192,7 +207,8 @@ async def search_identifiers(
     max_results: int = 50,
     context_lines: int = 2,
     include_definitions: bool = True,
-    include_references: bool = True
+    include_references: bool = True,
+    download_missing_parsers: bool = False,
 ) -> Dict[str, Any]:
     """Search for identifiers in code files. Get back a list of matching identifiers with their file, line number, and context.
        When searching, just use the identifier name without any special characters, prefixes or suffixes. The search is 
@@ -205,6 +221,7 @@ async def search_identifiers(
         context_lines: Number of lines of context to show
         include_definitions: Whether to include definition occurrences
         include_references: Whether to include reference occurrences
+        download_missing_parsers: Whether to download required parser runtimes before indexing
     
     Returns:
         Dictionary containing search results or error message
@@ -227,6 +244,8 @@ async def search_identifiers(
         repo_map = _REPO_MAP_CACHE[project_root]
 
         all_files = find_src_files(project_root)
+        if download_missing_parsers:
+            warm_languages(infer_parser_languages(all_files))
         project_state = _get_project_state(all_files)
 
         # Rebuild cached search index whenever any tracked file changes.

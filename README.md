@@ -78,6 +78,11 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+This installs two console scripts:
+
+- `repomap` for the CLI
+- `repomap-mcp` for the MCP server
+
 Note: `tree-sitter-language-pack` may download parser binaries on first use. If you need offline execution, pre-warm the languages you care about while network access is available.
 
 ## Usage
@@ -86,19 +91,25 @@ Note: `tree-sitter-language-pack` may download parser binaries on first use. If 
 
 ```bash
 # Map a project directory
-python repomap.py /path/to/project
+repomap /path/to/project
 
 # Or point --root at a repo and map everything under it
-python repomap.py --root /path/to/project
+repomap --root /path/to/project
 
 # With custom token budget
-python repomap.py /path/to/project --map-tokens 4096
+repomap /path/to/project --map-tokens 4096
 
 # Prioritize specific files (e.g., files you're editing)
-python repomap.py /path/to/project --chat-files src/main.ts
+repomap /path/to/project --chat-files src/main.ts
 
 # Exclude low-rank files
-python repomap.py /path/to/project --exclude-unranked
+repomap /path/to/project --exclude-unranked
+
+# Download missing parser runtimes before mapping
+repomap --root /path/to/project --download-missing-parsers
+
+# Pre-warm parser runtimes for the selected files and exit
+repomap --root /path/to/project --warm-languages auto
 ```
 
 ### MCP Server
@@ -120,6 +131,8 @@ Add to your Claude Code config (`.claude.json` or similar):
 The server exposes a `repo_map` tool that any MCP-compatible AI agent can call.
 
 Security note: the bundled MCP server only accepts `project_root` values under `~/AI`, `~/Projects`, or `~/Coding`, and it rejects file paths that resolve outside the selected root, including symlink escapes.
+
+You can also ask the MCP tool to download missing parser runtimes by passing `download_missing_parsers=true`.
 
 ## Dependencies
 

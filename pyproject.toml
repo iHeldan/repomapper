@@ -14,10 +14,12 @@ dependencies = [
     "pygments>=2.14.0",
     "tiktoken>=0.5.0",
     "tree-sitter>=0.20.0",
+    "tree-sitter-language-pack>=1.4.1",
 ]
 
 [project.scripts]
+repomap = "repomap:main"
 repomap-mcp = "repomap_server:main"
 
 [tool.setuptools]
-py-modules = ["repomap_server", "repomap", "repomap_class", "utils", "importance", "scm"]
+py-modules = ["repomap_server", "repomap", "repomap_class", "parser_support", "utils", "importance", "scm"]

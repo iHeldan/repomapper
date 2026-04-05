@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from utils import count_tokens, read_text, find_src_files
+from parser_support import infer_parser_languages, warm_languages
 from repomap_class import RepoMap
 
 
@@ -42,6 +43,19 @@ def tool_warning(message):
 def tool_error(message):
     """Print error messages."""
     print(f"Error: {message}", file=sys.stderr)
+
+
+def report_parser_warmup(result, info_handler, warning_handler) -> bool:
+    """Report parser warmup status. Returns True when all requested parsers are available."""
+    if result.downloaded:
+        info_handler(f"Downloaded parser runtimes: {', '.join(result.downloaded)}")
+    elif result.available:
+        info_handler(f"Parser runtimes already available: {', '.join(result.available)}")
+
+    if result.error:
+        warning_handler(result.error)
+
+    return not result.missing
 
 
 def main():
@@ -130,6 +144,18 @@ Examples:
         action="store_true",
         help="Exclude files with Page Rank 0 from the map"
     )
+
+    parser.add_argument(
+        "--download-missing-parsers",
+        action="store_true",
+        help="Download required parser runtimes before generating the map"
+    )
+
+    parser.add_argument(
+        "--warm-languages",
+        nargs="+",
+        help="Download parser runtimes and exit. Use 'auto' to infer languages from the selected files."
+    )
     
     args = parser.parse_args()
     
@@ -162,6 +188,20 @@ Examples:
     # Expand relative path specs against the repository root before collecting files.
     chat_files = [str(resolve_repo_path(root_path, f).resolve()) for f in chat_files_from_args]
     other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
+
+    inferred_parser_languages = infer_parser_languages(chat_files + other_files)
+
+    if args.warm_languages:
+        requested_languages = inferred_parser_languages if args.warm_languages == ["auto"] else args.warm_languages
+        warmup_result = warm_languages(requested_languages)
+        success = report_parser_warmup(warmup_result, tool_output, tool_warning)
+        if not requested_languages:
+            tool_warning("No supported parser runtimes were inferred from the selected files.")
+        sys.exit(0 if success else 1)
+
+    if args.download_missing_parsers:
+        warmup_result = warm_languages(inferred_parser_languages)
+        report_parser_warmup(warmup_result, tool_output, tool_warning)
 
     if args.verbose:
         tool_output(f"Chat files: {chat_files}")
@@ -203,6 +243,8 @@ Examples:
             print(map_content)
         else:
             tool_output("No repository map generated.")
+            for diagnostic in file_report.diagnostics:
+                tool_warning(diagnostic)
             
     except KeyboardInterrupt:
         tool_error("Interrupted by user")
