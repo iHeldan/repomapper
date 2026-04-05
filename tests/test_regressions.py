@@ -520,6 +520,10 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(first_action.effort, "small")
             self.assertEqual(first_action.risk_level, "low")
             self.assertEqual(first_action.why_now, "This is the fastest validation signal close to app.py.")
+            self.assertEqual(
+                first_action.expected_outcome,
+                "Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+            )
             self.assertEqual(first_action.location_hint, "tests/test_service.py:1")
             self.assertEqual(first_action.command_hint, "pytest tests/test_service.py")
             first_suggestion = report.suggested_checks[0]
@@ -582,6 +586,10 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.quick_actions[0].anchor_symbol, "Service")
             self.assertEqual(report.quick_actions[0].risk_level, "low")
             self.assertEqual(report.quick_actions[0].why_now, "This boundary is only 0 line(s) from the changed hunk.")
+            self.assertEqual(
+                report.quick_actions[0].expected_outcome,
+                "Confirm whether this boundary symbol or call site needs a matching update.",
+            )
             self.assertEqual(report.quick_actions[0].location_hint, "service.py:1")
             self.assertIsNone(report.quick_actions[0].command_hint)
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
@@ -1039,6 +1047,7 @@ class CliPathResolutionTests(unittest.TestCase):
                             message="Open this changed boundary first and verify the nearby symbol contract.",
                             risk_level="low",
                             why_now="This boundary is only 0 line(s) from the changed hunk.",
+                            expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
                             location_hint="service.py:1",
                             command_hint=None,
                             seed_file="app.py",
@@ -1114,6 +1123,10 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["quick_actions"][0]["kind"], "open_changed_boundary")
             self.assertEqual(payload["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(payload["quick_actions"][0]["why_now"], "This boundary is only 0 line(s) from the changed hunk.")
+            self.assertEqual(
+                payload["quick_actions"][0]["expected_outcome"],
+                "Confirm whether this boundary symbol or call site needs a matching update.",
+            )
             self.assertEqual(payload["quick_actions"][0]["location_hint"], "service.py:1")
             self.assertIsNone(payload["quick_actions"][0]["command_hint"])
             self.assertEqual(payload["quick_actions"][0]["anchor_file"], "service.py")
@@ -1342,6 +1355,7 @@ class RepoMapServerTests(unittest.TestCase):
                             message="Run or inspect this nearby test before making broader edits.",
                             risk_level="low",
                             why_now="This is the fastest validation signal close to app.py.",
+                            expected_outcome="Confirm whether the nearby test already passes or pinpoints the broken behavior.",
                             location_hint="service.py:1",
                             command_hint="pytest tests/test_app.py",
                             seed_file="app.py",
@@ -1401,6 +1415,10 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["quick_actions"][0]["kind"], "run_nearby_test")
             self.assertEqual(result["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(result["quick_actions"][0]["why_now"], "This is the fastest validation signal close to app.py.")
+            self.assertEqual(
+                result["quick_actions"][0]["expected_outcome"],
+                "Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+            )
             self.assertEqual(result["quick_actions"][0]["location_hint"], "service.py:1")
             self.assertEqual(result["quick_actions"][0]["command_hint"], "pytest tests/test_app.py")
             self.assertEqual(result["quick_actions"][0]["anchor_file"], "service.py")
