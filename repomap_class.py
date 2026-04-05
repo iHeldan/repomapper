@@ -124,6 +124,8 @@ class ImpactTarget:
     steps: List[ConnectionStep] = field(default_factory=list)
     boundary_symbols: List[str] = field(default_factory=list)
     boundary_relations: List[str] = field(default_factory=list)
+    boundary_locations: List["ImpactLocation"] = field(default_factory=list)
+    focus_lines: List[int] = field(default_factory=list)
     is_test_file: bool = False
     is_entrypoint_file: bool = False
     is_public_api_file: bool = False
@@ -144,12 +146,21 @@ class ImpactSuggestion:
 
 
 @dataclass
+class ImpactLocation:
+    file: str
+    line: int
+    kind: str
+    symbol: str
+
+
+@dataclass
 class ImpactSymbol:
     name: str
     target_files: List[str] = field(default_factory=list)
     seed_files: List[str] = field(default_factory=list)
     target_count: int = 0
     closest_distance: Optional[int] = None
+    locations: List[ImpactLocation] = field(default_factory=list)
 
 
 @dataclass
@@ -816,7 +827,7 @@ class RepoMap:
     def _build_file_reference_graph(
         self,
         fnames: List[str],
-    ) -> Tuple[Dict[str, str], nx.DiGraph, Dict[Tuple[str, str], List[str]]]:
+    ) -> Tuple[Dict[str, str], Dict[str, List[Tag]], nx.DiGraph, Dict[Tuple[str, str], List[str]]]:
         """Build a file-level reference graph and edge labels from parser tags."""
         all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in fnames))
         abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
@@ -824,6 +835,7 @@ class RepoMap:
         defines = defaultdict(set)
         references = defaultdict(set)
         edge_symbols = defaultdict(set)
+        tags_by_rel_fname = {}
 
         for fname in all_fnames:
             rel_fname = abs_to_rel[fname]
@@ -833,6 +845,7 @@ class RepoMap:
             tags = self.get_tags(fname, rel_fname)
             if self._tag_failures.get(fname):
                 continue
+            tags_by_rel_fname[rel_fname] = tags
 
             for tag in tags:
                 if tag.kind == "def":
@@ -863,7 +876,7 @@ class RepoMap:
                 edge_symbols[(rel_fname, test_rel_fname)].add("__related_test__")
                 edge_symbols[(test_rel_fname, rel_fname)].add("__related_source__")
 
-        return abs_to_rel, graph, {
+        return abs_to_rel, tags_by_rel_fname, graph, {
             pair: sorted(symbols)
             for pair, symbols in edge_symbols.items()
         }
@@ -904,7 +917,7 @@ class RepoMap:
                 error=f"End file is not in the selected repository scope: {end_rel}",
             )
 
-        _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        _, _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
         undirected_graph = graph.to_undirected()
 
         if start_rel not in undirected_graph or end_rel not in undirected_graph:
@@ -959,6 +972,37 @@ class RepoMap:
                 if symbol not in symbols:
                     symbols.append(symbol)
         return symbols[:8]
+
+    def _build_boundary_locations(
+        self,
+        path: List[str],
+        tags_by_rel_fname: Dict[str, List[Tag]],
+        boundary_symbols: List[str],
+    ) -> List[ImpactLocation]:
+        """Collect concrete tag locations for the symbols that define the impact path."""
+        symbol_set = set(boundary_symbols)
+        if not symbol_set:
+            return []
+
+        locations = []
+        seen = set()
+        for rel_fname in path:
+            for tag in tags_by_rel_fname.get(rel_fname, []):
+                if tag.kind not in {"def", "ref"} or tag.name not in symbol_set:
+                    continue
+                key = (tag.rel_fname, tag.line, tag.kind, tag.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                locations.append(
+                    ImpactLocation(
+                        file=tag.rel_fname,
+                        line=tag.line,
+                        kind=tag.kind,
+                        symbol=tag.name,
+                    )
+                )
+        return locations[:12]
 
     def _build_connection_steps(
         self,
@@ -1038,7 +1082,7 @@ class RepoMap:
             report.diagnostics = list(self.diagnostics)
             return report
 
-        _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        _, tags_by_rel_fname, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
         undirected_graph = graph.to_undirected()
 
         seed_rel_files = [abs_to_rel[seed_abs] for seed_abs in seed_abs_files]
@@ -1083,10 +1127,16 @@ class RepoMap:
 
             steps = self._build_connection_steps(path, graph, edge_symbols)
             boundary_symbols = self._extract_boundary_symbols(steps)
+            boundary_locations = self._build_boundary_locations(path, tags_by_rel_fname, boundary_symbols)
             boundary_relations = []
             for step in steps:
                 if step.relation not in boundary_relations:
                     boundary_relations.append(step.relation)
+            focus_lines = sorted({
+                location.line
+                for location in boundary_locations
+                if location.file == target_rel
+            })
             is_test_file = self._is_test_file(target_rel)
             entrypoint_signals, public_api_signals = self._get_path_role_signals(target_rel)
             is_entrypoint_file = bool(entrypoint_signals)
@@ -1166,6 +1216,8 @@ class RepoMap:
                     steps=steps,
                     boundary_symbols=boundary_symbols,
                     boundary_relations=boundary_relations[:5],
+                    boundary_locations=boundary_locations,
+                    focus_lines=focus_lines[:8],
                     is_test_file=is_test_file,
                     is_entrypoint_file=is_entrypoint_file,
                     is_public_api_file=is_public_api_file,
@@ -1216,6 +1268,7 @@ class RepoMap:
                         "target_files": [],
                         "seed_files": [],
                         "closest_distance": None,
+                        "locations": [],
                     },
                 )
                 if target.path not in entry["target_files"]:
@@ -1224,6 +1277,18 @@ class RepoMap:
                     entry["seed_files"].append(target.seed_file)
                 if entry["closest_distance"] is None or target.distance < entry["closest_distance"]:
                     entry["closest_distance"] = target.distance
+                for location in target.boundary_locations:
+                    if location.symbol != symbol:
+                        continue
+                    if any(
+                        existing.file == location.file
+                        and existing.line == location.line
+                        and existing.kind == location.kind
+                        and existing.symbol == location.symbol
+                        for existing in entry["locations"]
+                    ):
+                        continue
+                    entry["locations"].append(location)
 
         symbols = []
         for name, data in by_symbol.items():
@@ -1234,6 +1299,7 @@ class RepoMap:
                     seed_files=sorted(data["seed_files"]),
                     target_count=len(data["target_files"]),
                     closest_distance=data["closest_distance"],
+                    locations=data["locations"][:8],
                 )
             )
 

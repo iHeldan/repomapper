@@ -120,6 +120,14 @@ def format_impact_report(report) -> str:
             lines.append(f"Boundary symbols: {', '.join(target.boundary_symbols[:5])}")
         if target.boundary_relations:
             lines.append(f"Boundary relations: {', '.join(target.boundary_relations[:4])}")
+        if target.focus_lines:
+            lines.append(f"Target lines: {', '.join(str(line) for line in target.focus_lines[:6])}")
+        if target.boundary_locations:
+            preview = "; ".join(
+                f"{location.file}:{location.line} {location.kind} {location.symbol}"
+                for location in target.boundary_locations[:5]
+            )
+            lines.append(f"Boundary locations: {preview}")
         if target.steps:
             relation_chunks = []
             for step in target.steps:
@@ -143,8 +151,15 @@ def format_impact_report(report) -> str:
         lines.append("Shared symbols:")
         for symbol in report.shared_symbols[:8]:
             distance_suffix = f", closest hop {symbol.closest_distance}" if symbol.closest_distance is not None else ""
+            location_suffix = ""
+            if symbol.locations:
+                location_preview = ", ".join(
+                    f"{location.file}:{location.line} {location.kind}"
+                    for location in symbol.locations[:3]
+                )
+                location_suffix = f" [{location_preview}]"
             lines.append(
-                f"- {symbol.name}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}"
+                f"- {symbol.name}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}{location_suffix}"
             )
 
     if report.diagnostics:

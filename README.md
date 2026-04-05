@@ -81,7 +81,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first
-- Impact analysis now also surfaces shared boundary symbols so agents can see which APIs, classes, or functions likely carry the change across files
+- Impact analysis now also surfaces shared boundary symbols and their file/line locations so agents can jump straight to the likely change boundary
 
 ## Supported languages
 
@@ -179,7 +179,7 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
-- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `suggested_checks` payload in JSON mode
+- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `suggested_checks` payload in JSON mode, including `boundary_locations` and target `focus_lines`
 
 ### MCP Server
 
@@ -207,7 +207,7 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files.
-The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes shared boundary symbols plus prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes shared boundary symbols, concrete file/line boundary locations, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next.
 
 ## Dependencies
 
