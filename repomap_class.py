@@ -167,6 +167,7 @@ class ImpactQuickAction:
     risk_level: str = "low"
     confidence: float = 0.5
     focus_symbols: List[str] = field(default_factory=list)
+    focus_reason: Optional[str] = None
     why_now: Optional[str] = None
     expected_outcome: Optional[str] = None
     follow_if_true: Optional[str] = None
@@ -1642,7 +1643,7 @@ class RepoMap:
                 suggestion,
             )
             confidence = self._score_quick_action_confidence(kind, target)
-            focus_symbols = self._select_quick_action_symbols(kind, target, suggestion)
+            focus_symbols, focus_reason = self._select_quick_action_focus(kind, target, suggestion)
 
             quick_actions.append(
                 ImpactQuickAction(
@@ -1654,6 +1655,7 @@ class RepoMap:
                     risk_level=risk_level,
                     confidence=confidence,
                     focus_symbols=focus_symbols,
+                    focus_reason=focus_reason,
                     why_now=why_now,
                     expected_outcome=expected_outcome,
                     follow_if_true=follow_if_true,
@@ -1758,21 +1760,25 @@ class RepoMap:
         score = min(max(score, 0.15), 0.98)
         return round(score, 2)
 
-    def _select_quick_action_symbols(
+    def _select_quick_action_focus(
         self,
         kind: str,
         target: Optional[ImpactTarget],
         suggestion: ImpactSuggestion,
-    ) -> List[str]:
-        """Pick the most useful symbols to focus on for a quick action."""
+    ) -> Tuple[List[str], Optional[str]]:
+        """Pick the most useful symbols to focus on for a quick action and explain why."""
         candidates = []
+        focus_reason = None
 
         if suggestion.anchor_symbol and suggestion.anchor_kind != "file":
             candidates.append(suggestion.anchor_symbol)
+            focus_reason = "Focused on the anchor symbol highlighted for this action."
 
         if target:
             if kind in {"open_changed_boundary", "run_nearby_test"}:
                 candidates.extend(target.changed_boundary_symbols)
+                if target.changed_boundary_symbols:
+                    focus_reason = "Focused on changed boundary symbols nearest to the seed diff."
             if not candidates:
                 if kind == "open_changed_boundary":
                     candidates.extend(target.boundary_symbols[:1])
@@ -1780,6 +1786,8 @@ class RepoMap:
                     candidates.extend(target.boundary_symbols[:1])
                 else:
                     candidates.extend(target.boundary_symbols)
+                if candidates:
+                    focus_reason = "Focused on the strongest shared boundary symbols on this impact path."
 
         seen = set()
         focus_symbols = []
@@ -1791,7 +1799,7 @@ class RepoMap:
             if len(focus_symbols) >= 3:
                 break
 
-        return focus_symbols
+        return focus_symbols, focus_reason
 
     def _describe_quick_action(
         self,
