@@ -425,8 +425,10 @@ class RepoMapRankingTests(unittest.TestCase):
             test_dir = root / "tests"
             test_dir.mkdir()
             test_file = test_dir / "test_service.py"
-            for path in (app_file, service_file, db_file, test_file):
-                path.write_text("# test\n", encoding="utf-8")
+            app_file.write_text("def run_app():\n    Service()\n", encoding="utf-8")
+            service_file.write_text("class Service:\n    db_query()\n", encoding="utf-8")
+            db_file.write_text("def db_query():\n    return 1\n", encoding="utf-8")
+            test_file.write_text("def test_service():\n    assert True\n", encoding="utf-8")
 
             tags_by_name = {
                 "app.py": [
@@ -466,6 +468,9 @@ class RepoMapRankingTests(unittest.TestCase):
                 [(loc.file, loc.line, loc.kind, loc.symbol) for loc in by_path["service.py"].boundary_locations],
                 [("app.py", 2, "ref", "Service"), ("service.py", 1, "def", "Service")],
             )
+            self.assertEqual(by_path["service.py"].boundary_snippets[0].file, "app.py")
+            self.assertIn("2:     Service()", by_path["service.py"].boundary_snippets[0].excerpt)
+            self.assertIn("1: class Service:", by_path["service.py"].boundary_snippets[1].excerpt)
             self.assertIn("impact_path", {reason.code for reason in by_path["service.py"].reasons})
             self.assertIn("db.py", by_path)
             self.assertEqual(by_path["db.py"].path_from_seed, ["app.py", "service.py", "db.py"])
@@ -489,8 +494,8 @@ class RepoMapRankingTests(unittest.TestCase):
             root = Path(tmpdir).resolve()
             app_file = root / "app.py"
             service_file = root / "service.py"
-            app_file.write_text("# test\n", encoding="utf-8")
-            service_file.write_text("# test\n", encoding="utf-8")
+            app_file.write_text("def run_app():\n    Service()\n    helper()\n", encoding="utf-8")
+            service_file.write_text("class Service:\n    pass\n\ndef helper():\n    return 1\n", encoding="utf-8")
 
             tags_by_name = {
                 "app.py": [
@@ -527,6 +532,7 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(target.closest_changed_hunk_distance, 0)
             self.assertEqual(target.seed_focus_lines, [2])
             self.assertEqual([(h.start_line, h.end_line) for h in target.seed_hunks], [(2, 2)])
+            self.assertIn("2:     Service()", target.boundary_snippets[0].excerpt)
             self.assertIn("changed_symbol_boundary", {reason.code for reason in target.reasons})
             self.assertIn("changed_hunk_proximity", {reason.code for reason in target.reasons})
             self.assertEqual(report.shared_symbols[0].name, "Service")
@@ -540,8 +546,9 @@ class RepoMapRankingTests(unittest.TestCase):
             app_file = root / "app.py"
             helper_file = root / "helper.py"
             service_file = root / "service.py"
-            for path in (app_file, helper_file, service_file):
-                path.write_text("# test\n", encoding="utf-8")
+            app_file.write_text("x = 1\nService()\ny = 2\nHelper()\n", encoding="utf-8")
+            helper_file.write_text("def Helper():\n    return 1\n", encoding="utf-8")
+            service_file.write_text("def Service():\n    return 2\n", encoding="utf-8")
 
             tags_by_name = {
                 "app.py": [
@@ -940,14 +947,29 @@ class CliPathResolutionTests(unittest.TestCase):
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
                             seed_focus_lines=[2],
+                            seed_hunks=[repomap_class.ImpactHunk(2, 2)],
                             changed_boundary_symbols=["Service"],
+                            changed_boundary_distances={"Service": 0},
+                            closest_changed_hunk_distance=0,
                             boundary_symbols=["Service"],
                             boundary_relations=["references"],
                             boundary_locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
+                            boundary_snippets=[
+                                repomap_class.ImpactSnippet(
+                                    file="service.py",
+                                    start_line=1,
+                                    end_line=2,
+                                    highlight_line=1,
+                                    kind="def",
+                                    symbol="Service",
+                                    excerpt="1: class Service:\n2:     pass",
+                                )
+                            ],
                             focus_lines=[1],
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
                         )
                     ],
+                    changed_hunks_by_file={"app.py": [repomap_class.ImpactHunk(2, 2)]},
                     shared_symbols=[
                         repomap_class.ImpactSymbol(
                             name="Service",
@@ -956,6 +978,7 @@ class CliPathResolutionTests(unittest.TestCase):
                             target_count=1,
                             closest_distance=1,
                             is_changed_seed_symbol=True,
+                            closest_changed_hunk_distance=0,
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
@@ -1003,12 +1026,17 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["seed_files"], ["app.py"])
             self.assertEqual(payload["impacted_files"][0]["path"], "service.py")
             self.assertEqual(payload["impacted_files"][0]["seed_focus_lines"], [2])
+            self.assertEqual(payload["impacted_files"][0]["seed_hunks"][0]["start_line"], 2)
             self.assertEqual(payload["impacted_files"][0]["changed_boundary_symbols"], ["Service"])
+            self.assertEqual(payload["impacted_files"][0]["changed_boundary_distances"]["Service"], 0)
+            self.assertEqual(payload["impacted_files"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["impacted_files"][0]["boundary_symbols"], ["Service"])
             self.assertEqual(payload["impacted_files"][0]["focus_lines"], [1])
             self.assertEqual(payload["impacted_files"][0]["boundary_locations"][0]["line"], 1)
+            self.assertEqual(payload["impacted_files"][0]["boundary_snippets"][0]["highlight_line"], 1)
             self.assertEqual(payload["shared_symbols"][0]["name"], "Service")
             self.assertTrue(payload["shared_symbols"][0]["is_changed_seed_symbol"])
+            self.assertEqual(payload["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
@@ -1187,14 +1215,29 @@ class RepoMapServerTests(unittest.TestCase):
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
                             seed_focus_lines=[2],
+                            seed_hunks=[repomap_class.ImpactHunk(2, 2)],
                             changed_boundary_symbols=["Service"],
+                            changed_boundary_distances={"Service": 0},
+                            closest_changed_hunk_distance=0,
                             boundary_symbols=["Service"],
                             boundary_relations=["references"],
                             boundary_locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
+                            boundary_snippets=[
+                                repomap_class.ImpactSnippet(
+                                    file="service.py",
+                                    start_line=1,
+                                    end_line=2,
+                                    highlight_line=1,
+                                    kind="def",
+                                    symbol="Service",
+                                    excerpt="1: class Service:\n2:     pass",
+                                )
+                            ],
                             focus_lines=[1],
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
                         )
                     ],
+                    changed_hunks_by_file={"app.py": [repomap_class.ImpactHunk(2, 2)]},
                     shared_symbols=[
                         repomap_class.ImpactSymbol(
                             name="Service",
@@ -1203,6 +1246,7 @@ class RepoMapServerTests(unittest.TestCase):
                             target_count=1,
                             closest_distance=1,
                             is_changed_seed_symbol=True,
+                            closest_changed_hunk_distance=0,
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
@@ -1234,12 +1278,17 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["seed_files"], ["app.py"])
             self.assertEqual(result["impacted_files"][0]["path"], "service.py")
             self.assertEqual(result["impacted_files"][0]["seed_focus_lines"], [2])
+            self.assertEqual(result["impacted_files"][0]["seed_hunks"][0]["start_line"], 2)
             self.assertEqual(result["impacted_files"][0]["changed_boundary_symbols"], ["Service"])
+            self.assertEqual(result["impacted_files"][0]["changed_boundary_distances"]["Service"], 0)
+            self.assertEqual(result["impacted_files"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["impacted_files"][0]["boundary_symbols"], ["Service"])
             self.assertEqual(result["impacted_files"][0]["focus_lines"], [1])
             self.assertEqual(result["impacted_files"][0]["boundary_locations"][0]["line"], 1)
+            self.assertEqual(result["impacted_files"][0]["boundary_snippets"][0]["highlight_line"], 1)
             self.assertEqual(result["shared_symbols"][0]["name"], "Service")
             self.assertTrue(result["shared_symbols"][0]["is_changed_seed_symbol"])
+            self.assertEqual(result["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")

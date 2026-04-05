@@ -150,6 +150,11 @@ def format_impact_report(report) -> str:
                 for location in target.boundary_locations[:5]
             )
             lines.append(f"Boundary locations: {preview}")
+        if target.boundary_snippets:
+            lines.append("Boundary snippets:")
+            for snippet in target.boundary_snippets[:3]:
+                lines.append(f"  {snippet.file}:{snippet.highlight_line} {snippet.kind} {snippet.symbol}")
+                lines.extend(f"    {line}" for line in snippet.excerpt.splitlines())
         if target.steps:
             relation_chunks = []
             for step in target.steps:

@@ -130,6 +130,7 @@ class ImpactTarget:
     boundary_symbols: List[str] = field(default_factory=list)
     boundary_relations: List[str] = field(default_factory=list)
     boundary_locations: List["ImpactLocation"] = field(default_factory=list)
+    boundary_snippets: List["ImpactSnippet"] = field(default_factory=list)
     focus_lines: List[int] = field(default_factory=list)
     is_test_file: bool = False
     is_entrypoint_file: bool = False
@@ -156,6 +157,17 @@ class ImpactLocation:
     line: int
     kind: str
     symbol: str
+
+
+@dataclass
+class ImpactSnippet:
+    file: str
+    start_line: int
+    end_line: int
+    highlight_line: int
+    kind: str
+    symbol: str
+    excerpt: str
 
 
 @dataclass
@@ -1020,6 +1032,54 @@ class RepoMap:
                 )
         return locations[:12]
 
+    def _build_boundary_snippets(
+        self,
+        rel_to_abs: Dict[str, str],
+        boundary_locations: List[ImpactLocation],
+        context_lines: int = 1,
+    ) -> List[ImpactSnippet]:
+        """Extract short code excerpts around important boundary locations."""
+        snippets = []
+        seen = set()
+
+        for location in boundary_locations:
+            key = (location.file, location.line, location.kind, location.symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            abs_fname = rel_to_abs.get(location.file)
+            if not abs_fname:
+                continue
+            text = self.read_text_func_internal(abs_fname)
+            if not text:
+                continue
+
+            lines = text.splitlines()
+            if not lines:
+                continue
+
+            highlight_index = min(max(location.line - 1, 0), len(lines) - 1)
+            start_index = max(0, highlight_index - context_lines)
+            end_index = min(len(lines), highlight_index + context_lines + 1)
+            excerpt_lines = [
+                f"{line_no}: {lines[line_no - 1]}"
+                for line_no in range(start_index + 1, end_index + 1)
+            ]
+            snippets.append(
+                ImpactSnippet(
+                    file=location.file,
+                    start_line=start_index + 1,
+                    end_line=end_index,
+                    highlight_line=location.line,
+                    kind=location.kind,
+                    symbol=location.symbol,
+                    excerpt="\n".join(excerpt_lines),
+                )
+            )
+
+        return snippets[:6]
+
     @staticmethod
     def _group_changed_lines_into_hunks(changed_lines: List[int]) -> List[ImpactHunk]:
         """Collapse raw changed lines into contiguous diff hunk ranges."""
@@ -1274,6 +1334,7 @@ class RepoMap:
             }
             closest_changed_hunk_distance = min(changed_boundary_distances.values()) if changed_boundary_distances else None
             boundary_locations = self._build_boundary_locations(path, tags_by_rel_fname, boundary_symbols)
+            boundary_snippets = self._build_boundary_snippets(rel_to_abs, boundary_locations)
             boundary_relations = []
             for step in steps:
                 if step.relation not in boundary_relations:
@@ -1387,6 +1448,7 @@ class RepoMap:
                     boundary_symbols=boundary_symbols,
                     boundary_relations=boundary_relations[:5],
                     boundary_locations=boundary_locations,
+                    boundary_snippets=boundary_snippets,
                     focus_lines=focus_lines[:8],
                     is_test_file=is_test_file,
                     is_entrypoint_file=is_entrypoint_file,
