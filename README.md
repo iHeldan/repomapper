@@ -9,7 +9,7 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 1. **Parses** every source file with Tree-sitter to extract definitions and references
 2. **Builds a graph** where files are nodes and symbol references are edges
 3. **Ranks** files using PageRank — heavily referenced modules surface to the top
-4. **Compresses** the output to fit within a token budget (default 1024 tokens)
+4. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -78,6 +78,8 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+Note: `tree-sitter-language-pack` may download parser binaries on first use. If you need offline execution, pre-warm the languages you care about while network access is available.
+
 ## Usage
 
 ### CLI
@@ -85,6 +87,9 @@ pip install -e .
 ```bash
 # Map a project directory
 python repomap.py /path/to/project
+
+# Or point --root at a repo and map everything under it
+python repomap.py --root /path/to/project
 
 # With custom token budget
 python repomap.py /path/to/project --map-tokens 4096
@@ -113,6 +118,8 @@ Add to your Claude Code config (`.claude.json` or similar):
 ```
 
 The server exposes a `repo_map` tool that any MCP-compatible AI agent can call.
+
+Security note: the bundled MCP server only accepts `project_root` values under `~/AI`, `~/Projects`, or `~/Coding`, and it rejects file paths that resolve outside the selected root, including symlink escapes.
 
 ## Dependencies
 
