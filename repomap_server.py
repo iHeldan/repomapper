@@ -40,6 +40,7 @@ def _validate_path_containment(file_path: str, root_str: str) -> bool:
 # R3 Finding B2-1: Cache RepoMap instances for search_identifiers
 _REPO_MAP_CACHE: Dict[str, Any] = {}
 _DEFAULT_MCP_RANKED_FILES_LIMIT = 50
+_DEFAULT_MCP_RANKED_FILES_PREVIEW_LIMIT = 10
 
 
 def _get_project_state(file_paths: List[str]) -> tuple:
@@ -80,6 +81,36 @@ def _serialize_repo_map_report(
     report["ranked_files_limit_applied"] = (
         None if not include_ranked_files or ranked_files_limit is None or ranked_files_limit <= 0 else ranked_files_limit
     )
+    report["ranked_files_preview_limit"] = _DEFAULT_MCP_RANKED_FILES_PREVIEW_LIMIT
+    report["ranked_files_preview"] = [
+        {
+            "path": entry.get("path"),
+            "rank": entry.get("rank"),
+            "base_rank": entry.get("base_rank"),
+            "is_changed_file": entry.get("is_changed_file", False),
+            "is_test_file": entry.get("is_test_file", False),
+            "is_entrypoint_file": entry.get("is_entrypoint_file", False),
+            "is_public_api_file": entry.get("is_public_api_file", False),
+            "is_important_file": entry.get("is_important_file", False),
+            "sample_symbols": (entry.get("sample_symbols") or [])[:3],
+            "matched_query_terms": (entry.get("matched_query_terms") or [])[:3],
+            "related_tests": (entry.get("related_tests") or [])[:3],
+            "related_changed_files": (entry.get("related_changed_files") or [])[:3],
+            "reason_codes": [
+                reason.get("code")
+                for reason in (entry.get("reasons") or [])[:5]
+                if reason.get("code")
+            ],
+        }
+        for entry in ranked_files[:_DEFAULT_MCP_RANKED_FILES_PREVIEW_LIMIT]
+    ]
+    report["ranked_files_counts"] = {
+        "changed_files": sum(1 for entry in ranked_files if entry.get("is_changed_file")),
+        "test_files": sum(1 for entry in ranked_files if entry.get("is_test_file")),
+        "entrypoint_files": sum(1 for entry in ranked_files if entry.get("is_entrypoint_file")),
+        "public_api_files": sum(1 for entry in ranked_files if entry.get("is_public_api_file")),
+        "important_files": sum(1 for entry in ranked_files if entry.get("is_important_file")),
+    }
     return report
 
 # Configure logging - only show errors
@@ -162,6 +193,7 @@ async def repo_map(
             - 'changed_files' / 'changed_neighbor_depth': changed-file focus metadata for impact views
             - 'ranked_files': per-file rank metadata and reason codes (top 50 by default in MCP)
             - 'ranked_files_total' / 'ranked_files_returned' / 'ranked_files_truncated': summary metadata for omitted ranked file rows
+            - 'ranked_files_preview': a compact top-ranked preview that stays small even for large repositories
         Or an 'error' key if an error occurred.
     """
     if error := _check_project_root(project_root):

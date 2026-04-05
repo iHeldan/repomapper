@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - MCP `repo_map` now trims `ranked_files` to the top 50 entries by default and reports `ranked_files_total`, `ranked_files_returned`, `ranked_files_omitted`, and `ranked_files_truncated` summary fields for large repositories
+- MCP `repo_map` now also exposes a compact `ranked_files_preview` list and `ranked_files_counts` summary so agents can inspect the top-ranked paths without pulling the full metadata payload
 - MCP callers can opt back into the full ranked file list with `ranked_files_limit=0`, or suppress detailed ranked file rows entirely with `include_ranked_files=false`
 
 ## 0.2.1 - 2026-04-06

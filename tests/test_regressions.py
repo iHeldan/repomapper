@@ -2371,6 +2371,12 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(len(result["report"]["ranked_files"]), 50)
             self.assertEqual(result["report"]["ranked_files"][0]["path"], "src/file_000.py")
             self.assertEqual(result["report"]["ranked_files"][-1]["path"], "src/file_049.py")
+            self.assertEqual(result["report"]["ranked_files_preview_limit"], 10)
+            self.assertEqual(len(result["report"]["ranked_files_preview"]), 10)
+            self.assertEqual(result["report"]["ranked_files_preview"][0]["path"], "src/file_000.py")
+            self.assertEqual(result["report"]["ranked_files_preview"][-1]["path"], "src/file_009.py")
+            self.assertEqual(result["report"]["ranked_files_counts"]["changed_files"], 0)
+            self.assertEqual(result["report"]["ranked_files_counts"]["test_files"], 0)
 
     def test_repo_map_can_return_full_or_omitted_ranked_files_in_mcp_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2379,7 +2385,16 @@ class RepoMapServerTests(unittest.TestCase):
             source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
 
             ranked_files = [
-                RankedFile(path=f"src/file_{index:03d}.py", rank=10 - index, base_rank=10 - index)
+                RankedFile(
+                    path=f"src/file_{index:03d}.py",
+                    rank=10 - index,
+                    base_rank=10 - index,
+                    is_changed_file=index == 0,
+                    is_test_file=index == 1,
+                    is_public_api_file=index == 2,
+                    sample_symbols=[f"symbol_{index}"],
+                    reasons=[RankingReason("definitions", "Has definitions.")],
+                )
                 for index in range(3)
             ]
 
@@ -2414,6 +2429,12 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertFalse(full_result["report"]["ranked_files_truncated"])
             self.assertIsNone(full_result["report"]["ranked_files_limit_applied"])
             self.assertEqual(len(full_result["report"]["ranked_files"]), 3)
+            self.assertEqual(len(full_result["report"]["ranked_files_preview"]), 3)
+            self.assertEqual(full_result["report"]["ranked_files_preview"][0]["sample_symbols"], ["symbol_0"])
+            self.assertEqual(full_result["report"]["ranked_files_preview"][0]["reason_codes"], ["definitions"])
+            self.assertEqual(full_result["report"]["ranked_files_counts"]["changed_files"], 1)
+            self.assertEqual(full_result["report"]["ranked_files_counts"]["test_files"], 1)
+            self.assertEqual(full_result["report"]["ranked_files_counts"]["public_api_files"], 1)
 
             self.assertEqual(omitted_result["report"]["ranked_files_total"], 3)
             self.assertEqual(omitted_result["report"]["ranked_files_returned"], 0)
@@ -2421,6 +2442,8 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertTrue(omitted_result["report"]["ranked_files_truncated"])
             self.assertIsNone(omitted_result["report"]["ranked_files_limit_applied"])
             self.assertEqual(omitted_result["report"]["ranked_files"], [])
+            self.assertEqual(len(omitted_result["report"]["ranked_files_preview"]), 3)
+            self.assertEqual(omitted_result["report"]["ranked_files_preview"][2]["path"], "src/file_002.py")
 
     def test_repo_map_passes_query_to_repo_mapper(self):
         with tempfile.TemporaryDirectory() as tmpdir:
