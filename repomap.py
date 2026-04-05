@@ -128,6 +128,12 @@ def format_impact_report(report) -> str:
         if target.reasons:
             lines.append(f"Why: {target.reasons[0].message}")
 
+    if report.suggested_checks:
+        lines.append("")
+        lines.append("Suggested checks:")
+        for suggestion in report.suggested_checks:
+            lines.append(f"- [P{suggestion.priority}] {suggestion.kind} {suggestion.target}: {suggestion.message}")
+
     if report.diagnostics:
         lines.append("")
         lines.append("Diagnostics:")

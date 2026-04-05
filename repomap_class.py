@@ -132,11 +132,22 @@ class ImpactTarget:
 
 
 @dataclass
+class ImpactSuggestion:
+    priority: int
+    kind: str
+    target: str
+    message: str
+    seed_file: Optional[str] = None
+    path_from_seed: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ImpactReport:
     seed_files: List[str]
     max_depth: int
     max_results: int
     impacted_files: List[ImpactTarget] = field(default_factory=list)
+    suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -1149,6 +1160,7 @@ class RepoMap:
             )
         )
         report.impacted_files = impacted_files[:max_results]
+        report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
 
         diagnostics = list(self.diagnostics)
         if report.impacted_files:
@@ -1161,6 +1173,123 @@ class RepoMap:
             )
         report.diagnostics = diagnostics
         return report
+
+    def _build_impact_suggestions(
+        self,
+        seed_rel_files: List[str],
+        impacted_files: List[ImpactTarget],
+    ) -> List[ImpactSuggestion]:
+        """Build a short, prioritized follow-up checklist for impact analysis."""
+        suggestions = []
+        seen = set()
+
+        def add_suggestion(
+            priority: int,
+            kind: str,
+            target: str,
+            message: str,
+            seed_file: Optional[str] = None,
+            path_from_seed: Optional[List[str]] = None,
+        ) -> None:
+            key = (kind, target)
+            if key in seen:
+                return
+            seen.add(key)
+            suggestions.append(
+                ImpactSuggestion(
+                    priority=priority,
+                    kind=kind,
+                    target=target,
+                    message=message,
+                    seed_file=seed_file,
+                    path_from_seed=(path_from_seed or [])[:],
+                )
+            )
+
+        for target in impacted_files:
+            if target.is_test_file:
+                add_suggestion(
+                    0,
+                    "review_test",
+                    target.path,
+                    f"Review or run this nearby test for changes around {target.seed_file}.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            if target.is_public_api_file:
+                add_suggestion(
+                    1,
+                    "review_public_api",
+                    target.path,
+                    f"Check whether the public API contract exposed by {target.path} changed.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            if target.is_entrypoint_file:
+                add_suggestion(
+                    1,
+                    "verify_entrypoint",
+                    target.path,
+                    f"Verify the main execution flow still reaches {target.path} correctly.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            if target.summary_kind == "config":
+                add_suggestion(
+                    2,
+                    "review_config",
+                    target.path,
+                    f"Inspect this config file because it sits on the impact path from {target.seed_file}.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            elif target.summary_kind == "doc":
+                add_suggestion(
+                    3,
+                    "read_doc",
+                    target.path,
+                    f"Check this documentation file for setup or workflow assumptions around {target.seed_file}.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            if target.distance == 1 and not target.is_test_file:
+                add_suggestion(
+                    2,
+                    "inspect_neighbor",
+                    target.path,
+                    f"Inspect this direct neighbor because it is one hop away from {target.seed_file}.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
+            if target.steps and any(step.symbols for step in target.steps):
+                symbol_names = [
+                    symbol
+                    for step in target.steps
+                    for symbol in step.symbols[:2]
+                ]
+                if symbol_names:
+                    add_suggestion(
+                        2,
+                        "follow_symbols",
+                        target.path,
+                        f"Trace shared symbols such as {', '.join(symbol_names[:3])}.",
+                        seed_file=target.seed_file,
+                        path_from_seed=target.path_from_seed,
+                    )
+
+        if not suggestions and impacted_files:
+            first_target = impacted_files[0]
+            add_suggestion(
+                2,
+                "inspect_neighbor",
+                first_target.path,
+                f"Start with the closest impacted file on the path from {first_target.seed_file}.",
+                seed_file=first_target.seed_file,
+                path_from_seed=first_target.path_from_seed,
+            )
+
+        suggestions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
+        return suggestions[:8]
 
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""

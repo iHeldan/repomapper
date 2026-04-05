@@ -465,6 +465,9 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("tests/test_service.py", by_path)
             self.assertTrue(by_path["tests/test_service.py"].is_test_file)
             self.assertIn("impact_test", {reason.code for reason in by_path["tests/test_service.py"].reasons})
+            suggestion_kinds = {suggestion.kind for suggestion in report.suggested_checks}
+            self.assertIn("review_test", suggestion_kinds)
+            self.assertIn("inspect_neighbor", suggestion_kinds)
 
 
 class SearchIdentifierCacheTests(unittest.TestCase):
@@ -833,6 +836,16 @@ class CliPathResolutionTests(unittest.TestCase):
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
                         )
                     ],
+                    suggested_checks=[
+                        repomap_class.ImpactSuggestion(
+                            priority=1,
+                            kind="review_public_api",
+                            target="service.py",
+                            message="Check whether the public API contract changed.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                        )
+                    ],
                     diagnostics=["Found 1 impacted file."],
                 )
 
@@ -865,6 +878,7 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(captured["max_results"], 5)
             self.assertEqual(payload["seed_files"], ["app.py"])
             self.assertEqual(payload["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(stderr.getvalue(), "")
 
@@ -889,6 +903,7 @@ class CliPathResolutionTests(unittest.TestCase):
                     max_depth=max_depth,
                     max_results=max_results,
                     impacted_files=[],
+                    suggested_checks=[],
                     diagnostics=["No impacted files."],
                 )
 
@@ -1039,6 +1054,16 @@ class RepoMapServerTests(unittest.TestCase):
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
                         )
                     ],
+                    suggested_checks=[
+                        repomap_class.ImpactSuggestion(
+                            priority=0,
+                            kind="review_test",
+                            target="tests/test_app.py",
+                            message="Review or run this nearby test.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "tests/test_app.py"],
+                        )
+                    ],
                     diagnostics=["Found 1 impacted file."],
                 )
 
@@ -1056,6 +1081,7 @@ class RepoMapServerTests(unittest.TestCase):
 
             self.assertEqual(result["seed_files"], ["app.py"])
             self.assertEqual(result["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(result["diagnostics"], ["Found 1 impacted file."])
 
@@ -1077,6 +1103,7 @@ class RepoMapServerTests(unittest.TestCase):
                     max_depth=max_depth,
                     max_results=max_results,
                     impacted_files=[],
+                    suggested_checks=[],
                     diagnostics=["Found changed impact context."],
                 )
 
