@@ -46,6 +46,8 @@ class RankedFile:
     base_rank: float
     included_in_map: bool = False
     is_test_file: bool = False
+    is_entrypoint_file: bool = False
+    is_public_api_file: bool = False
     is_chat_file: bool = False
     is_mentioned_file: bool = False
     is_important_file: bool = False
@@ -58,6 +60,8 @@ class RankedFile:
     matched_query_symbol_terms: List[str] = field(default_factory=list)
     related_tests: List[str] = field(default_factory=list)
     related_sources: List[str] = field(default_factory=list)
+    entrypoint_signals: List[str] = field(default_factory=list)
+    public_api_signals: List[str] = field(default_factory=list)
     mentioned_identifiers: List[str] = field(default_factory=list)
     sample_symbols: List[str] = field(default_factory=list)
     inbound_neighbors: List[str] = field(default_factory=list)
@@ -92,6 +96,23 @@ QUERY_STOP_WORDS = {
     "with",
 }
 TEST_DIR_NAMES = {"test", "tests", "__tests__", "spec", "specs"}
+ENTRYPOINT_FILENAMES = {
+    "__main__.py", "main.py", "app.py", "server.py", "cli.py", "manage.py", "wsgi.py", "asgi.py",
+    "main.ts", "main.tsx", "main.js", "main.jsx",
+    "app.ts", "app.tsx", "app.js", "app.jsx",
+    "server.ts", "server.tsx", "server.js", "server.jsx",
+    "index.ts", "index.tsx", "index.js", "index.jsx",
+}
+ENTRYPOINT_DIR_NAMES = {"bin", "cmd", "scripts"}
+PUBLIC_API_FILENAMES = {
+    "__init__.py", "index.ts", "index.tsx", "index.js", "index.jsx",
+    "api.py", "api.ts", "api.tsx", "api.js", "api.jsx",
+    "client.py", "client.ts", "client.js",
+    "routes.py", "routes.ts", "routes.js",
+    "router.py", "router.ts", "router.js",
+    "urls.py", "urls.ts", "urls.js",
+}
+PUBLIC_API_DIR_NAMES = {"api", "apis", "route", "routes", "router", "routers", "public"}
 
 # Tag namedtuple for storing parsed code definitions and references
 Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
@@ -380,6 +401,96 @@ class RepoMap:
             if candidate in known_rel_fnames and candidate != rel_fname and self._is_test_file(candidate)
         ]
 
+    def _get_path_role_signals(self, rel_fname: str) -> Tuple[List[str], List[str]]:
+        """Infer entrypoint/public API signals from the relative path alone."""
+        normalized = self._normalize_rel_path(rel_fname).lower()
+        path = Path(normalized)
+        basename = path.name
+        parent_parts = [part.lower() for part in path.parts[:-1]]
+
+        entrypoint_signals = []
+        public_api_signals = []
+
+        if basename in ENTRYPOINT_FILENAMES:
+            entrypoint_signals.append("entrypoint_filename")
+        if any(part in ENTRYPOINT_DIR_NAMES for part in parent_parts):
+            entrypoint_signals.append("entrypoint_directory")
+
+        if basename in PUBLIC_API_FILENAMES:
+            public_api_signals.append("public_api_filename")
+        if any(part in PUBLIC_API_DIR_NAMES for part in parent_parts):
+            public_api_signals.append("public_api_directory")
+
+        return entrypoint_signals, public_api_signals
+
+    def _get_runtime_role_metadata(
+        self,
+        fname: str,
+        rel_fname: str,
+    ) -> Tuple[List[str], List[str], List[Tag]]:
+        """Infer entrypoint/public API signals and synthetic highlight tags from file contents."""
+        text = self.read_text_func_internal(fname)
+        if not text:
+            return [], [], []
+
+        entrypoint_patterns = [
+            ("python_main_guard", re.compile(r'if\s+__name__\s*==\s*["\']__main__["\']')),
+            ("main_function", re.compile(r'\b(def|func)\s+main\s*\(|\bstatic\s+void\s+main\s*\(')),
+            ("server_bootstrap", re.compile(r'\b(app|server)\.listen\s*\(|\buvicorn\.run\s*\(|\bcreateServer\s*\(')),
+            ("cli_bootstrap", re.compile(r'\bargparse\.ArgumentParser\b|\bclick\.command\b|\btyper\.Typer\b')),
+            ("web_app_factory", re.compile(r'\bFastAPI\s*\(|\bFlask\s*\(|\bexpress\s*\(')),
+        ]
+        public_api_patterns = [
+            ("route_definition", re.compile(r'@\w*app\.route|@\w*router\.(get|post|put|delete|patch)|\b(router|app)\.(get|post|put|delete|patch)\s*\(')),
+            ("api_router", re.compile(r'\bAPIRouter\s*\(|\bBlueprint\s*\(')),
+            ("explicit_exports", re.compile(r'\bexport\s+(class|function|const|interface|type)\b|\bmodule\.exports\b|\bexports\.\w+\b|\b__all__\b')),
+            ("package_reexports", re.compile(r'^\s*from\s+\.[\w\.]+\s+import\s+')),
+            ("url_patterns", re.compile(r'\burlpatterns\b')),
+        ]
+
+        entrypoint_signals = []
+        public_api_signals = []
+        tag_specs = []
+
+        for line_num, line in enumerate(text.splitlines(), start=1):
+            for signal_name, pattern in entrypoint_patterns:
+                if pattern.search(line):
+                    entrypoint_signals.append(signal_name)
+                    tag_specs.append(("entry", line_num))
+            for signal_name, pattern in public_api_patterns:
+                if pattern.search(line):
+                    public_api_signals.append(signal_name)
+                    tag_specs.append(("api", line_num))
+
+        basename = Path(rel_fname).name
+        synthetic_tags = [
+            Tag(rel_fname=rel_fname, fname=fname, line=line_num, name=basename, kind=kind)
+            for kind, line_num in self._dedupe_preserve_order(tag_specs)[:6]
+        ]
+        return (
+            self._dedupe_preserve_order(entrypoint_signals),
+            self._dedupe_preserve_order(public_api_signals),
+            synthetic_tags,
+        )
+
+    def _get_role_rank_context(
+        self,
+        entrypoint_signals: List[str],
+        public_api_signals: List[str],
+    ) -> Tuple[float, float]:
+        """Return rank floor and boost for entrypoint/public API files."""
+        boost = 1.0
+        rank_floor = 0.0
+
+        if entrypoint_signals:
+            boost *= min(1.5 + (0.15 * max(len(entrypoint_signals) - 1, 0)), 2.0)
+            rank_floor = max(rank_floor, 0.05 + (0.01 * min(len(entrypoint_signals), 3)))
+        if public_api_signals:
+            boost *= min(1.3 + (0.1 * max(len(public_api_signals) - 1, 0)), 1.8)
+            rank_floor = max(rank_floor, 0.035 + (0.005 * min(len(public_api_signals), 3)))
+
+        return rank_floor, boost
+
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""
         text = self.read_text_func_internal(fname)
@@ -462,6 +573,8 @@ class RepoMap:
         *,
         rel_fname: str,
         is_test_file: bool,
+        is_entrypoint_file: bool,
+        is_public_api_file: bool,
         is_chat_file: bool,
         is_mentioned_file: bool,
         is_important_file: bool,
@@ -469,6 +582,8 @@ class RepoMap:
         matched_query_symbol_terms: List[str],
         related_tests: List[str],
         related_sources: List[str],
+        entrypoint_signals: List[str],
+        public_api_signals: List[str],
         mentioned_identifiers: List[str],
         inbound_neighbors: List[str],
         outbound_neighbors: List[str],
@@ -482,6 +597,20 @@ class RepoMap:
             reasons.append(RankingReason("chat_file", "File is part of the active chat/edit context."))
         if is_mentioned_file:
             reasons.append(RankingReason("mentioned_file", "File was explicitly mentioned by the caller."))
+        if is_entrypoint_file:
+            reasons.append(
+                RankingReason(
+                    "entrypoint_file",
+                    f"Looks like an application entrypoint via: {', '.join(entrypoint_signals[:3])}.",
+                )
+            )
+        if is_public_api_file:
+            reasons.append(
+                RankingReason(
+                    "public_api_file",
+                    f"Looks like a public API surface via: {', '.join(public_api_signals[:3])}.",
+                )
+            )
         if matched_query_path_terms:
             reasons.append(
                 RankingReason(
@@ -788,6 +917,8 @@ class RepoMap:
         supplemental_tags_by_file: Dict[str, List[Tag]] = {}
         definitions_by_file: Dict[str, List[str]] = defaultdict(list)
         references_by_file: Dict[str, List[str]] = defaultdict(list)
+        entrypoint_signals_by_file: Dict[str, List[str]] = {}
+        public_api_signals_by_file: Dict[str, List[str]] = {}
         query_path_matches_by_file: Dict[str, List[str]] = {}
         query_symbol_matches_by_file: Dict[str, List[str]] = {}
         mentioned_identifiers_by_file: Dict[str, Set[str]] = defaultdict(set)
@@ -856,6 +987,20 @@ class RepoMap:
                 if synthetic_test_tags:
                     supplemental_tags_by_file.setdefault(fname, []).extend(synthetic_test_tags)
 
+            path_entrypoint_signals, path_public_api_signals = self._get_path_role_signals(rel_fname)
+            runtime_entrypoint_signals, runtime_public_api_signals, runtime_role_tags = self._get_runtime_role_metadata(
+                fname,
+                rel_fname,
+            )
+            entrypoint_signals_by_file[rel_fname] = self._dedupe_preserve_order(
+                path_entrypoint_signals + runtime_entrypoint_signals
+            )
+            public_api_signals_by_file[rel_fname] = self._dedupe_preserve_order(
+                path_public_api_signals + runtime_public_api_signals
+            )
+            if runtime_role_tags:
+                supplemental_tags_by_file.setdefault(fname, []).extend(runtime_role_tags)
+
             path_matches, symbol_matches = self._match_query_terms(
                 rel_fname,
                 tags + supplemental_tags_by_file.get(fname, []),
@@ -923,7 +1068,7 @@ class RepoMap:
         ranked_tags = []
         max_rank_by_file: Dict[str, float] = defaultdict(float)
         effective_rank_by_file: Dict[str, float] = {}
-        query_boost_by_file: Dict[str, float] = {}
+        context_boost_by_file: Dict[str, float] = {}
 
         for rel_fname in known_rel_fnames:
             effective_rank, query_boost = self._get_query_rank_context(
@@ -931,13 +1076,17 @@ class RepoMap:
                 query_path_matches_by_file.get(rel_fname, []),
                 query_symbol_matches_by_file.get(rel_fname, []),
             )
-            effective_rank_by_file[rel_fname] = effective_rank
-            query_boost_by_file[rel_fname] = query_boost
+            role_floor, role_boost = self._get_role_rank_context(
+                entrypoint_signals_by_file.get(rel_fname, []),
+                public_api_signals_by_file.get(rel_fname, []),
+            )
+            effective_rank_by_file[rel_fname] = max(effective_rank, role_floor)
+            context_boost_by_file[rel_fname] = query_boost * role_boost
         
         for fname in included:
             rel_fname = abs_to_rel[fname]
             effective_file_rank = effective_rank_by_file.get(rel_fname, ranks.get(rel_fname, 0.0))
-            query_boost = query_boost_by_file.get(rel_fname, 1.0)
+            context_boost = context_boost_by_file.get(rel_fname, 1.0)
 
             if is_test_file_by_rel.get(rel_fname, False):
                 related_source_support = 0.0
@@ -947,7 +1096,7 @@ class RepoMap:
                         source_support *= 4.0
                     if source_rel_fname in mentioned_fnames:
                         source_support *= 1.5
-                    source_support *= min(query_boost_by_file.get(source_rel_fname, 1.0), 2.0)
+                    source_support *= min(context_boost_by_file.get(source_rel_fname, 1.0), 2.0)
                     related_source_support = max(related_source_support, source_support * 0.5)
                 effective_file_rank = max(effective_file_rank, related_source_support)
 
@@ -965,7 +1114,7 @@ class RepoMap:
                         mentioned_fnames,
                         mentioned_idents,
                         chat_rel_fnames,
-                        query_boost,
+                        context_boost,
                     )
                     ranked_tags.append((final_rank, tag))
                     max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
@@ -978,7 +1127,7 @@ class RepoMap:
                     mentioned_fnames,
                     mentioned_idents,
                     chat_rel_fnames,
-                    query_boost,
+                    context_boost,
                 )
                 ranked_tags.append((final_rank, tag))
                 max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
@@ -998,6 +1147,8 @@ class RepoMap:
             outbound_neighbors = sorted(G.successors(rel_fname))
             definition_names = self._dedupe_preserve_order(definitions_by_file.get(rel_fname, []))
             reference_names = self._dedupe_preserve_order(references_by_file.get(rel_fname, []))
+            entrypoint_signals = entrypoint_signals_by_file.get(rel_fname, [])
+            public_api_signals = public_api_signals_by_file.get(rel_fname, [])
             matched_query_path_terms = query_path_matches_by_file.get(rel_fname, [])
             matched_query_symbol_terms = query_symbol_matches_by_file.get(rel_fname, [])
             related_tests = related_tests_by_source.get(rel_fname, [])
@@ -1018,6 +1169,8 @@ class RepoMap:
                     rank=max_rank_by_file[rel_fname],
                     base_rank=ranks.get(rel_fname, 0.0),
                     is_test_file=is_test_file_by_rel.get(rel_fname, False),
+                    is_entrypoint_file=bool(entrypoint_signals),
+                    is_public_api_file=bool(public_api_signals),
                     is_chat_file=fname in chat_fnames_set,
                     is_mentioned_file=rel_fname in mentioned_fnames,
                     is_important_file=any(tag.kind == "doc" for tag in supplemental_tags),
@@ -1032,6 +1185,8 @@ class RepoMap:
                     matched_query_symbol_terms=matched_query_symbol_terms,
                     related_tests=related_tests[:5],
                     related_sources=related_sources[:5],
+                    entrypoint_signals=entrypoint_signals[:5],
+                    public_api_signals=public_api_signals[:5],
                     mentioned_identifiers=mentioned_identifiers,
                     sample_symbols=(definition_names or reference_names or [Path(rel_fname).name])[:5],
                     inbound_neighbors=inbound_neighbors[:5],
@@ -1040,6 +1195,8 @@ class RepoMap:
                     reasons=self._build_file_reasons(
                         rel_fname=rel_fname,
                         is_test_file=is_test_file_by_rel.get(rel_fname, False),
+                        is_entrypoint_file=bool(entrypoint_signals),
+                        is_public_api_file=bool(public_api_signals),
                         is_chat_file=fname in chat_fnames_set,
                         is_mentioned_file=rel_fname in mentioned_fnames,
                         is_important_file=any(tag.kind == "doc" for tag in supplemental_tags),
@@ -1047,6 +1204,8 @@ class RepoMap:
                         matched_query_symbol_terms=matched_query_symbol_terms,
                         related_tests=related_tests,
                         related_sources=related_sources,
+                        entrypoint_signals=entrypoint_signals,
+                        public_api_signals=public_api_signals,
                         mentioned_identifiers=mentioned_identifiers,
                         inbound_neighbors=inbound_neighbors,
                         outbound_neighbors=outbound_neighbors,

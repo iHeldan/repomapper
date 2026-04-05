@@ -211,6 +211,56 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("tests/test_auth.py:", map_content)
             self.assertIn("def test_auth_login()", map_content)
 
+    def test_entrypoint_and_public_api_files_are_surfaced(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            api_dir = root / "api"
+            api_dir.mkdir()
+            app_file = root / "app.py"
+            routes_file = api_dir / "routes.py"
+            helper_file = root / "worker.py"
+            app_file.write_text(
+                "from api.routes import router\n\n"
+                "def run():\n"
+                "    return router\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    run()\n",
+                encoding="utf-8",
+            )
+            routes_file.write_text(
+                "router = APIRouter()\n\n"
+                "@router.get('/health')\n"
+                "def health():\n"
+                "    return {'ok': True}\n",
+                encoding="utf-8",
+            )
+            helper_file.write_text("def worker():\n    return 1\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [Tag("app.py", str(app_file), 3, "run", "def"), Tag("app.py", str(app_file), 1, "router", "ref")],
+                "routes.py": [],
+                "worker.py": [Tag("worker.py", str(helper_file), 1, "worker", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(app_file), str(routes_file), str(helper_file)],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertTrue(by_path["app.py"].is_entrypoint_file)
+            self.assertIn("entrypoint_file", {reason.code for reason in by_path["app.py"].reasons})
+            self.assertIn("python_main_guard", by_path["app.py"].entrypoint_signals)
+            self.assertTrue(by_path["api/routes.py"].is_public_api_file)
+            self.assertIn("public_api_file", {reason.code for reason in by_path["api/routes.py"].reasons})
+            self.assertIn("route_definition", by_path["api/routes.py"].public_api_signals)
+            self.assertIn("if __name__ == \"__main__\":", map_content)
+            self.assertIn("@router.get('/health')", map_content)
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
