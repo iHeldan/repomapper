@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,9 +17,30 @@ import repomap
 import repomap_budget
 import repomap_eval
 import repomap_class
-import repomap_server
 from repomap_class import FileReport, RankedFile, RankingReason, RepoMap, Tag
 from utils import find_src_files, is_within_directory
+
+
+class _FastMCPStub:
+    def __init__(self, name):
+        self.name = name
+
+    def tool(self):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def run(self):
+        raise RuntimeError("FastMCP stub cannot run a server in unit tests")
+
+
+_fastmcp_stub = types.ModuleType("fastmcp")
+_fastmcp_stub.FastMCP = _FastMCPStub
+_fastmcp_stub.settings = types.SimpleNamespace(stateless_http=False)
+
+with mock.patch.dict(sys.modules, {"fastmcp": _fastmcp_stub}):
+    import repomap_server
 
 
 def init_git_repo(root: Path) -> None:
@@ -268,6 +290,126 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(by_path["a.py"].outbound_neighbors, ["b.py"])
             self.assertIn("referenced_by", {reason.code for reason in by_path["c.py"].reasons})
             self.assertEqual(by_path["b.py"].sample_symbols, ["B"])
+
+    def test_group_and_sort_tags_by_file_breaks_ties_alphabetically(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+
+            grouped = repo_map._group_and_sort_tags_by_file(
+                [
+                    (0.5, Tag("z_file.py", str(root / "z_file.py"), 1, "func_z", "def")),
+                    (0.5, Tag("a_file.py", str(root / "a_file.py"), 1, "func_a", "def")),
+                    (0.5, Tag("m_file.py", str(root / "m_file.py"), 1, "func_m", "def")),
+                ]
+            )
+
+            self.assertEqual([rel_fname for rel_fname, _ in grouped], ["a_file.py", "m_file.py", "z_file.py"])
+
+    def test_ranked_files_break_equal_rank_ties_by_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            files = []
+            for name in ("zeta.py", "alpha.py", "middle.py"):
+                path = root / name
+                path.write_text(f"def {path.stem}():\n    return 1\n", encoding="utf-8")
+                files.append(str(path))
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: [Tag(rel_fname, fname, 1, Path(rel_fname).stem, "def")]
+
+            with mock.patch.object(RepoMap, "_calculate_pagerank", return_value={name: 1.0 for name in ("alpha.py", "middle.py", "zeta.py")}):
+                _, file_report = repo_map.get_ranked_tags(
+                    [],
+                    list(reversed(files)),
+                )
+
+            self.assertEqual([entry.path for entry in file_report.ranked_files], ["alpha.py", "middle.py", "zeta.py"])
+
+    def test_ranked_tags_map_uses_lazy_filtering_fast_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            ranked_tags = [
+                (3.0, Tag("alpha.py", str(root / "alpha.py"), 1, "alpha", "def")),
+                (2.0, Tag("beta.py", str(root / "beta.py"), 1, "beta", "def")),
+                (1.0, Tag("gamma.py", str(root / "gamma.py"), 1, "gamma", "def")),
+            ]
+            file_report = FileReport(
+                excluded={},
+                definition_matches=3,
+                reference_matches=0,
+                total_files_considered=3,
+                ranked_files=[
+                    RankedFile(path="alpha.py", rank=3.0, base_rank=3.0),
+                    RankedFile(path="beta.py", rank=2.0, base_rank=2.0),
+                    RankedFile(path="gamma.py", rank=1.0, base_rank=1.0),
+                ],
+            )
+
+            repo_map.get_ranked_tags = lambda *args, **kwargs: (ranked_tags, file_report)
+            repo_map._render_file_section = lambda rel_fname, file_tag_list: f"FILE:{rel_fname}"
+            repo_map.to_tree = lambda sorted_files: "|".join(rel_fname for rel_fname, _ in sorted_files)
+
+            def fake_token_count(text: str) -> int:
+                if text.startswith("FILE:"):
+                    raise AssertionError(f"Fast path should not pre-filter individual files, saw {text!r}")
+                return len([part for part in text.split("|") if part])
+
+            repo_map.token_count = fake_token_count
+
+            map_content, report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                ["alpha.py", "beta.py", "gamma.py"],
+                max_map_tokens=3,
+            )
+
+            self.assertEqual(map_content, "alpha.py|beta.py|gamma.py")
+            self.assertEqual(report.selected_files, ["alpha.py", "beta.py", "gamma.py"])
+
+    def test_ranked_tags_map_retries_after_filtering_oversized_leading_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            ranked_tags = [
+                (3.0, Tag("alpha.py", str(root / "alpha.py"), 1, "alpha", "def")),
+                (2.0, Tag("beta.py", str(root / "beta.py"), 1, "beta", "def")),
+                (1.0, Tag("gamma.py", str(root / "gamma.py"), 1, "gamma", "def")),
+            ]
+            file_report = FileReport(
+                excluded={},
+                definition_matches=3,
+                reference_matches=0,
+                total_files_considered=3,
+                ranked_files=[
+                    RankedFile(path="alpha.py", rank=3.0, base_rank=3.0),
+                    RankedFile(path="beta.py", rank=2.0, base_rank=2.0),
+                    RankedFile(path="gamma.py", rank=1.0, base_rank=1.0),
+                ],
+            )
+
+            repo_map.get_ranked_tags = lambda *args, **kwargs: (ranked_tags, file_report)
+            repo_map._render_file_section = lambda rel_fname, file_tag_list: f"FILE:{rel_fname}"
+            repo_map.to_tree = lambda sorted_files: "|".join(rel_fname for rel_fname, _ in sorted_files)
+
+            def fake_token_count(text: str) -> int:
+                if text.startswith("FILE:"):
+                    return 99 if text == "FILE:alpha.py" else 1
+                return 99 if "alpha.py" in text else len([part for part in text.split("|") if part])
+
+            repo_map.token_count = fake_token_count
+
+            map_content, report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                ["alpha.py", "beta.py", "gamma.py"],
+                max_map_tokens=2,
+            )
+
+            self.assertEqual(map_content, "beta.py|gamma.py")
+            self.assertEqual(report.selected_files, ["beta.py", "gamma.py"])
+            self.assertFalse(report.ranked_files[0].included_in_map)
+            self.assertTrue(report.ranked_files[1].included_in_map)
+            self.assertTrue(report.ranked_files[2].included_in_map)
 
     def test_query_terms_boost_matching_paths_and_symbols(self):
         with tempfile.TemporaryDirectory() as tmpdir:

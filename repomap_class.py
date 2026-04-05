@@ -3914,13 +3914,21 @@ class RepoMap:
                 )
             )
 
-        ranked_files.sort(key=lambda entry: entry.rank, reverse=True)
+        ranked_files.sort(key=lambda entry: (-entry.rank, entry.path))
         file_report.ranked_files = ranked_files
         self.file_summary_by_file = {path: items[:] for path, items in summary_items_by_file.items()}
         self.file_summary_kind_by_file = summary_kind_by_file.copy()
         
-        # Sort by rank (descending)
-        ranked_tags.sort(key=lambda x: x[0], reverse=True)
+        # Sort by rank with deterministic tie-breakers for stable map output.
+        ranked_tags.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].rel_fname,
+                item[1].line,
+                item[1].name,
+                item[1].kind,
+            )
+        )
         
         return ranked_tags, file_report
     
@@ -3969,8 +3977,7 @@ class RepoMap:
 
         return sorted(
             file_tags.items(),
-            key=lambda x: max(rank for rank, tag in x[1]),
-            reverse=True
+            key=lambda item: (-max(rank for rank, _ in item[1]), item[0]),
         )
 
     def _format_summary_block(self, rel_fname: str) -> str:
@@ -4083,22 +4090,14 @@ class RepoMap:
         # R3 Finding B1-1: Hoist grouping/sorting out of binary search loop
         sorted_files_with_tags = self._group_and_sort_tags_by_file(ranked_tags)
 
-        # Filter out files whose individual tree exceeds the token limit
-        fitting_files = []
-        for entry in sorted_files_with_tags:
-            rel_fname, file_tag_list = entry
-            rendered = self._render_file_section(rel_fname, file_tag_list)
-            if rendered and self.token_count(rendered) <= max_map_tokens:
-                fitting_files.append(entry)
-
-        if not fitting_files:
-            return None, file_report
-
-        def try_files(num_files: int) -> Tuple[Optional[str], int]:
+        def try_files(
+            file_entries: List[Tuple[str, List[Tuple[float, Tag]]]],
+            num_files: int,
+        ) -> Tuple[Optional[str], int]:
             if num_files <= 0:
                 return None, 0
 
-            selected_file_entries = fitting_files[:num_files]
+            selected_file_entries = file_entries[:num_files]
             tree_output = self.to_tree(selected_file_entries)
 
             if not tree_output:
@@ -4107,23 +4106,51 @@ class RepoMap:
             tokens = self.token_count(tree_output)
             return tree_output, tokens
 
-        # Binary search for optimal number of files (start at 1; try_files(0) is always None)
-        left, right = 1, len(fitting_files)
-        best_tree = None
-        best_selected_files: List[str] = []
-        best_tokens = 0
+        def binary_search(
+            file_entries: List[Tuple[str, List[Tuple[float, Tag]]]],
+        ) -> Tuple[Optional[str], List[str], int]:
+            if not file_entries:
+                return None, [], 0
 
-        while left <= right:
-            mid = (left + right) // 2
-            tree_output, tokens = try_files(mid)
+            left, right = 1, len(file_entries)
+            best_tree = None
+            best_selected_files: List[str] = []
+            best_tokens = 0
 
-            if tree_output and tokens <= max_map_tokens:
-                best_tree = tree_output
-                best_selected_files = [rel_fname for rel_fname, _ in fitting_files[:mid]]
-                best_tokens = tokens
-                left = mid + 1
-            else:
-                right = mid - 1
+            while left <= right:
+                mid = (left + right) // 2
+                tree_output, tokens = try_files(file_entries, mid)
+
+                if tree_output and tokens <= max_map_tokens:
+                    best_tree = tree_output
+                    best_selected_files = [rel_fname for rel_fname, _ in file_entries[:mid]]
+                    best_tokens = tokens
+                    left = mid + 1
+                else:
+                    right = mid - 1
+
+            return best_tree, best_selected_files, best_tokens
+
+        # Fast path: binary search the full sorted list first.
+        best_tree, best_selected_files, best_tokens = binary_search(sorted_files_with_tags)
+
+        if best_tree is None:
+            # If the leading file is too large, drop individually oversized files and retry.
+            fitting_files = []
+            for entry in sorted_files_with_tags:
+                rel_fname, file_tag_list = entry
+                rendered = self._render_file_section(rel_fname, file_tag_list)
+                if rendered and self.token_count(rendered) <= max_map_tokens:
+                    fitting_files.append(entry)
+
+            best_tree, best_selected_files, best_tokens = binary_search(fitting_files)
+
+        if best_tree is None:
+            for ranked_file in file_report.ranked_files:
+                ranked_file.included_in_map = False
+            file_report.selected_files = []
+            file_report.map_tokens = 0
+            return None, file_report
 
         selected_paths = set(best_selected_files)
         for ranked_file in file_report.ranked_files:

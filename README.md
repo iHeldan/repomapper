@@ -71,6 +71,8 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Batch edge addition for graph building (R3)
 - Pre-computed relative paths to avoid redundant Path operations (R4)
 - Pre-sorted file grouping hoisted out of binary search loop (R3)
+- Deterministic tie-breaking keeps equal-rank map output stable across runs
+- Lazy oversize-file filtering only kicks in when the first binary-search pass cannot fit any prefix
 
 ### Better repository context
 
