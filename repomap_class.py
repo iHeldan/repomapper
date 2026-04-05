@@ -164,6 +164,8 @@ class ImpactQuickAction:
     target: str
     message: str
     effort: str = "small"
+    risk_level: str = "low"
+    why_now: Optional[str] = None
     location_hint: Optional[str] = None
     command_hint: Optional[str] = None
     seed_file: Optional[str] = None
@@ -1628,6 +1630,8 @@ class RepoMap:
             if kind == "run_nearby_test":
                 command_hint = self._suggest_test_command(suggestion.target)
 
+            risk_level, why_now = self._describe_quick_action(kind, target, suggestion)
+
             quick_actions.append(
                 ImpactQuickAction(
                     priority=suggestion.priority if priority is None else priority,
@@ -1635,6 +1639,8 @@ class RepoMap:
                     target=suggestion.target,
                     message=message,
                     effort=effort,
+                    risk_level=risk_level,
+                    why_now=why_now,
                     location_hint=location_hint,
                     command_hint=command_hint,
                     seed_file=suggestion.seed_file,
@@ -1689,6 +1695,37 @@ class RepoMap:
 
         quick_actions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
         return quick_actions[:6]
+
+    def _describe_quick_action(
+        self,
+        kind: str,
+        target: Optional[ImpactTarget],
+        suggestion: ImpactSuggestion,
+    ) -> Tuple[str, str]:
+        """Provide a compact risk label and urgency explanation for a quick action."""
+        seed_file = suggestion.seed_file or "the seed file"
+
+        if kind == "run_nearby_test":
+            return "low", f"This is the fastest validation signal close to {seed_file}."
+
+        if kind == "open_changed_boundary":
+            if target and target.closest_changed_hunk_distance is not None:
+                return (
+                    "low",
+                    f"This boundary is only {target.closest_changed_hunk_distance} line(s) from the changed hunk.",
+                )
+            return "low", "This is the narrowest downstream boundary touched by the changed symbol."
+
+        if kind == "open_direct_neighbor":
+            return "low", "A one-hop neighbor is usually the smallest non-test file worth checking next."
+
+        if kind == "check_config_assumption":
+            return "medium", "Config mismatches can invalidate the rest of the impact trail quickly."
+
+        if kind == "start_here":
+            return "medium", "No lower-risk shortcut was found, so this is the best anchored starting point."
+
+        return "low", "This is an anchored next step near the current impact boundary."
 
     def _suggest_test_command(self, rel_path: str) -> Optional[str]:
         """Suggest a concrete test command when the repository gives a clear enough signal."""

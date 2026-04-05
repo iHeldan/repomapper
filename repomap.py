@@ -171,7 +171,9 @@ def format_impact_report(report) -> str:
         lines.append("")
         lines.append("Quick actions:")
         for action in report.quick_actions:
-            lines.append(f"- [P{action.priority}] ({action.effort}) {action.kind} {action.target}: {action.message}")
+            lines.append(f"- [P{action.priority}] ({action.effort}, risk {action.risk_level}) {action.kind} {action.target}: {action.message}")
+            if action.why_now:
+                lines.append(f"  why now: {action.why_now}")
             if action.location_hint:
                 lines.append(f"  open {action.location_hint}")
             if action.command_hint:
