@@ -89,6 +89,7 @@ async def repo_map(
     force_refresh: bool = False,
     changed_only: bool = False,
     base_ref: Optional[str] = None,
+    changed_neighbors: int = 0,
     download_missing_parsers: bool = False,
     mentioned_files: Optional[List[str]] = None,
     mentioned_idents: Optional[List[str]] = None,
@@ -108,6 +109,7 @@ async def repo_map(
     :param force_refresh: If True, forces a refresh of the repository map cache. Defaults to False.
     :param changed_only: If True, limit the map to git-changed files under project_root.
     :param base_ref: Optional git ref to compare against when changed_only is enabled.
+    :param changed_neighbors: When non-zero, include repository neighbors up to this graph distance around changed files.
     :param download_missing_parsers: If True, attempts to download required parser runtimes before parsing files.
     :param mentioned_files: Optional list of file paths explicitly mentioned in the conversation and receive a mid-level ranking boost.
     :param mentioned_idents: Optional list of identifiers explicitly mentioned in the conversation, to boost their ranking.
@@ -121,6 +123,7 @@ async def repo_map(
             - 'reference_matches': count of matched references
             - 'total_files_considered': total files processed
             - 'query' / 'query_terms': task query context used for ranking, when provided
+            - 'changed_files' / 'changed_neighbor_depth': changed-file focus metadata for impact views
             - 'ranked_files': per-file rank metadata and reason codes
         Or an 'error' key if an error occurred.
     """
@@ -138,7 +141,7 @@ async def repo_map(
     if token_limit <= 0:
         token_limit = 8192
 
-    changed_only = changed_only or bool(base_ref)
+    changed_only = changed_only or bool(base_ref) or changed_neighbors > 0
     
     chat_files_list = chat_files or []
     mentioned_fnames_set = set(mentioned_files) if mentioned_files else None
@@ -166,13 +169,19 @@ async def repo_map(
         abs_other = [f for f in abs_other if f not in abs_chat_set]
 
         git_result = None
+        changed_files = []
         if changed_only:
             git_result = get_changed_files(root_str, base_ref)
             if git_result.error:
                 return {"error": git_result.error}
 
             changed_set = set(git_result.files)
-            abs_other = [path for path in abs_other if path in changed_set] if other_files is not None else git_result.files
+            changed_files = [path for path in abs_other if path in changed_set] if other_files is not None else git_result.files
+            if changed_neighbors > 0:
+                if not changed_files:
+                    abs_other = []
+            else:
+                abs_other = changed_files
 
         warmup_result = None
         if download_missing_parsers:
@@ -194,6 +203,8 @@ async def repo_map(
             other_files=abs_other,
             mentioned_fnames=mentioned_fnames_set,
             mentioned_idents=mentioned_idents_set,
+            changed_fnames=set(changed_files) if changed_files else None,
+            changed_neighbor_depth=changed_neighbors,
             query=query,
             force_refresh=force_refresh
         )

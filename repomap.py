@@ -182,6 +182,13 @@ Examples:
     )
 
     parser.add_argument(
+        "--changed-neighbors",
+        type=int,
+        default=0,
+        help="When used with --changed, include repository neighbors up to this graph distance around changed files"
+    )
+
+    parser.add_argument(
         "--output-format",
         choices=("text", "json"),
         default="text",
@@ -202,7 +209,7 @@ Examples:
         'error': tool_error
     }
     
-    args.changed = args.changed or bool(args.base_ref)
+    args.changed = args.changed or bool(args.base_ref) or args.changed_neighbors > 0
 
     # Process file arguments
     root_path = Path(args.root).resolve()
@@ -224,6 +231,8 @@ Examples:
     chat_files = [str(resolve_repo_path(root_path, f).resolve()) for f in chat_files_from_args]
     other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
 
+    changed_files = []
+
     if args.changed:
         git_result = get_changed_files(str(root_path), args.base_ref)
         if git_result.error:
@@ -231,12 +240,21 @@ Examples:
             sys.exit(1)
 
         changed_set = set(git_result.files)
-        other_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+        changed_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+        if args.changed_neighbors > 0:
+            if not changed_files:
+                other_files = []
+        else:
+            other_files = changed_files
 
         if args.verbose:
             for diagnostic in git_result.diagnostics:
                 info_handler(diagnostic)
-            info_handler(f"Changed files selected: {len(other_files)}")
+            info_handler(f"Changed files selected: {len(changed_files)}")
+            if args.changed_neighbors > 0 and changed_files:
+                info_handler(
+                    f"Including repository neighbors up to distance {args.changed_neighbors} around changed files."
+                )
 
     inferred_parser_languages = infer_parser_languages(chat_files + other_files)
 
@@ -278,6 +296,8 @@ Examples:
             other_files=other_files,
             mentioned_fnames=mentioned_fnames,
             mentioned_idents=mentioned_idents,
+            changed_fnames=set(changed_files) if changed_files else None,
+            changed_neighbor_depth=args.changed_neighbors,
             query=args.query,
             force_refresh=args.force_refresh
         )

@@ -45,6 +45,8 @@ class RankedFile:
     rank: float
     base_rank: float
     included_in_map: bool = False
+    is_changed_file: bool = False
+    changed_neighbor_distance: Optional[int] = None
     is_test_file: bool = False
     is_entrypoint_file: bool = False
     is_public_api_file: bool = False
@@ -58,6 +60,7 @@ class RankedFile:
     matched_query_terms: List[str] = field(default_factory=list)
     matched_query_path_terms: List[str] = field(default_factory=list)
     matched_query_symbol_terms: List[str] = field(default_factory=list)
+    related_changed_files: List[str] = field(default_factory=list)
     related_tests: List[str] = field(default_factory=list)
     related_sources: List[str] = field(default_factory=list)
     entrypoint_signals: List[str] = field(default_factory=list)
@@ -79,6 +82,8 @@ class FileReport:
     diagnostics: List[str] = field(default_factory=list)
     query: Optional[str] = None
     query_terms: List[str] = field(default_factory=list)
+    changed_files: List[str] = field(default_factory=list)
+    changed_neighbor_depth: int = 0
     ranked_files: List[RankedFile] = field(default_factory=list)
     selected_files: List[str] = field(default_factory=list)
     map_tokens: int = 0
@@ -491,6 +496,16 @@ class RepoMap:
 
         return rank_floor, boost
 
+    def _get_changed_rank_context(self, changed_distance: Optional[int]) -> Tuple[float, float]:
+        """Return rank floor and boost for changed files and their nearby impact neighbors."""
+        if changed_distance is None:
+            return 0.0, 1.0
+        if changed_distance == 0:
+            return 0.08, 8.0
+        if changed_distance == 1:
+            return 0.03, 2.5
+        return 0.015, max(1.25, 2.25 - (0.25 * changed_distance))
+
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""
         text = self.read_text_func_internal(fname)
@@ -572,6 +587,9 @@ class RepoMap:
         self,
         *,
         rel_fname: str,
+        is_changed_file: bool,
+        changed_neighbor_distance: Optional[int],
+        related_changed_files: List[str],
         is_test_file: bool,
         is_entrypoint_file: bool,
         is_public_api_file: bool,
@@ -593,6 +611,16 @@ class RepoMap:
         """Build a short machine-readable explanation for why a file ranked highly."""
         reasons = []
 
+        if is_changed_file:
+            reasons.append(RankingReason("changed_file", "File has direct local changes in the current git selection."))
+        elif changed_neighbor_distance is not None:
+            preview = ", ".join(related_changed_files[:3]) if related_changed_files else "changed files"
+            reasons.append(
+                RankingReason(
+                    "changed_neighbor",
+                    f"Within changed-file impact neighborhood (distance {changed_neighbor_distance}) via {preview}.",
+                )
+            )
         if is_chat_file:
             reasons.append(RankingReason("chat_file", "File is part of the active chat/edit context."))
         if is_mentioned_file:
@@ -893,21 +921,36 @@ class RepoMap:
         other_fnames: List[str],
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        changed_fnames: Optional[Set[str]] = None,
+        changed_neighbor_depth: int = 0,
         query: Optional[str] = None,
     ) -> Tuple[List[Tuple[float, Tag]], FileReport]:
         """Get ranked tags using PageRank algorithm with file report."""
         # Return empty list and empty report if no files
         if not chat_fnames and not other_fnames:
-            return [], FileReport({}, 0, 0, 0, query=query, query_terms=self._extract_query_terms(query))
+            return [], FileReport(
+                {},
+                0,
+                0,
+                0,
+                query=query,
+                query_terms=self._extract_query_terms(query),
+                changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
+                changed_neighbor_depth=changed_neighbor_depth,
+            )
             
         if mentioned_fnames is None:
             mentioned_fnames = set()
         if mentioned_idents is None:
             mentioned_idents = set()
+        if changed_fnames is None:
+            changed_fnames = set()
+        changed_neighbor_depth = max(0, changed_neighbor_depth)
         query_terms = self._extract_query_terms(query)
 
         chat_fnames = [os.path.abspath(f) for f in chat_fnames]
         other_fnames = [os.path.abspath(f) for f in other_fnames]
+        changed_fnames = {os.path.abspath(f) for f in changed_fnames}
 
         included: List[str] = []
         excluded: Dict[str, str] = {}
@@ -930,6 +973,7 @@ class RepoMap:
         all_fnames = list(dict.fromkeys(chat_fnames + other_fnames))
         abs_to_rel: Dict[str, str] = {f: self.get_rel_fname(f) for f in all_fnames}
         known_rel_fnames = set(abs_to_rel.values())
+        changed_rel_fnames = {abs_to_rel[f] for f in changed_fnames if f in abs_to_rel}
         is_test_file_by_rel = {rel_fname: self._is_test_file(rel_fname) for rel_fname in known_rel_fnames}
         related_tests_by_source = {
             rel_fname: self._find_related_test_files(rel_fname, known_rel_fnames)
@@ -1040,6 +1084,8 @@ class RepoMap:
                 list(self.diagnostics),
                 query=query,
                 query_terms=query_terms,
+                changed_files=sorted(changed_rel_fnames),
+                changed_neighbor_depth=changed_neighbor_depth,
             )
         
         # Run PageRank
@@ -1062,6 +1108,8 @@ class RepoMap:
             diagnostics=list(self.diagnostics),
             query=query,
             query_terms=query_terms,
+            changed_files=sorted(changed_rel_fnames),
+            changed_neighbor_depth=changed_neighbor_depth,
         )
         
         # Collect and rank tags
@@ -1069,6 +1117,55 @@ class RepoMap:
         max_rank_by_file: Dict[str, float] = defaultdict(float)
         effective_rank_by_file: Dict[str, float] = {}
         context_boost_by_file: Dict[str, float] = {}
+        changed_distance_by_file: Dict[str, int] = {}
+        changed_anchors_by_file: Dict[str, List[str]] = defaultdict(list)
+
+        if changed_rel_fnames:
+            adjacency = defaultdict(set)
+            for src_rel_fname, dst_rel_fname in G.edges():
+                adjacency[src_rel_fname].add(dst_rel_fname)
+                adjacency[dst_rel_fname].add(src_rel_fname)
+
+            for changed_rel_fname in changed_rel_fnames:
+                changed_distance_by_file.setdefault(changed_rel_fname, 0)
+                if changed_rel_fname not in changed_anchors_by_file[changed_rel_fname]:
+                    changed_anchors_by_file[changed_rel_fname].append(changed_rel_fname)
+
+                if changed_neighbor_depth <= 0:
+                    continue
+
+                queue = [(changed_rel_fname, 0)]
+                seen = {changed_rel_fname}
+                while queue:
+                    current_rel_fname, distance = queue.pop(0)
+                    if distance >= changed_neighbor_depth:
+                        continue
+                    next_distance = distance + 1
+                    heuristic_neighbors = set(adjacency.get(current_rel_fname, set()))
+                    heuristic_neighbors.update(related_tests_by_source.get(current_rel_fname, []))
+                    heuristic_neighbors.update(related_sources_by_test.get(current_rel_fname, []))
+                    for neighbor_rel_fname in heuristic_neighbors:
+                        if neighbor_rel_fname not in known_rel_fnames or neighbor_rel_fname in seen:
+                            continue
+                        seen.add(neighbor_rel_fname)
+                        queue.append((neighbor_rel_fname, next_distance))
+                        best_distance = changed_distance_by_file.get(neighbor_rel_fname)
+                        if best_distance is None or next_distance < best_distance:
+                            changed_distance_by_file[neighbor_rel_fname] = next_distance
+                            changed_anchors_by_file[neighbor_rel_fname] = [changed_rel_fname]
+                        elif next_distance == best_distance and changed_rel_fname not in changed_anchors_by_file[neighbor_rel_fname]:
+                            changed_anchors_by_file[neighbor_rel_fname].append(changed_rel_fname)
+
+        allowed_changed_scope = None
+        if changed_rel_fnames:
+            if changed_neighbor_depth > 0:
+                allowed_changed_scope = {
+                    rel_fname
+                    for rel_fname, distance in changed_distance_by_file.items()
+                    if distance <= changed_neighbor_depth
+                }
+            else:
+                allowed_changed_scope = set(changed_rel_fnames)
 
         for rel_fname in known_rel_fnames:
             effective_rank, query_boost = self._get_query_rank_context(
@@ -1080,13 +1177,17 @@ class RepoMap:
                 entrypoint_signals_by_file.get(rel_fname, []),
                 public_api_signals_by_file.get(rel_fname, []),
             )
-            effective_rank_by_file[rel_fname] = max(effective_rank, role_floor)
-            context_boost_by_file[rel_fname] = query_boost * role_boost
+            changed_floor, changed_boost = self._get_changed_rank_context(changed_distance_by_file.get(rel_fname))
+            effective_rank_by_file[rel_fname] = max(effective_rank, role_floor, changed_floor)
+            context_boost_by_file[rel_fname] = query_boost * role_boost * changed_boost
         
         for fname in included:
             rel_fname = abs_to_rel[fname]
             effective_file_rank = effective_rank_by_file.get(rel_fname, ranks.get(rel_fname, 0.0))
             context_boost = context_boost_by_file.get(rel_fname, 1.0)
+
+            if allowed_changed_scope is not None and rel_fname not in allowed_changed_scope:
+                continue
 
             if is_test_file_by_rel.get(rel_fname, False):
                 related_source_support = 0.0
@@ -1138,6 +1239,8 @@ class RepoMap:
             tags = tags_by_file.get(fname, [])
             supplemental_tags = supplemental_tags_by_file.get(fname, [])
 
+            if allowed_changed_scope is not None and rel_fname not in allowed_changed_scope:
+                continue
             if not tags and not supplemental_tags:
                 continue
             if rel_fname not in max_rank_by_file:
@@ -1168,6 +1271,8 @@ class RepoMap:
                     path=rel_fname,
                     rank=max_rank_by_file[rel_fname],
                     base_rank=ranks.get(rel_fname, 0.0),
+                    is_changed_file=rel_fname in changed_rel_fnames,
+                    changed_neighbor_distance=changed_distance_by_file.get(rel_fname),
                     is_test_file=is_test_file_by_rel.get(rel_fname, False),
                     is_entrypoint_file=bool(entrypoint_signals),
                     is_public_api_file=bool(public_api_signals),
@@ -1183,6 +1288,7 @@ class RepoMap:
                     ),
                     matched_query_path_terms=matched_query_path_terms,
                     matched_query_symbol_terms=matched_query_symbol_terms,
+                    related_changed_files=changed_anchors_by_file.get(rel_fname, [])[:5],
                     related_tests=related_tests[:5],
                     related_sources=related_sources[:5],
                     entrypoint_signals=entrypoint_signals[:5],
@@ -1194,6 +1300,9 @@ class RepoMap:
                     lines_of_interest=lines_of_interest[:10],
                     reasons=self._build_file_reasons(
                         rel_fname=rel_fname,
+                        is_changed_file=rel_fname in changed_rel_fnames,
+                        changed_neighbor_distance=changed_distance_by_file.get(rel_fname),
+                        related_changed_files=changed_anchors_by_file.get(rel_fname, []),
                         is_test_file=is_test_file_by_rel.get(rel_fname, False),
                         is_entrypoint_file=bool(entrypoint_signals),
                         is_public_api_file=bool(public_api_signals),
@@ -1300,6 +1409,8 @@ class RepoMap:
         max_map_tokens: int,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        changed_fnames: Optional[Set[str]] = None,
+        changed_neighbor_depth: int = 0,
         query: Optional[str] = None,
         force_refresh: bool = False
     ) -> Tuple[Optional[str], FileReport]:
@@ -1310,6 +1421,8 @@ class RepoMap:
             max_map_tokens,
             tuple(sorted(mentioned_fnames or [])),
             tuple(sorted(mentioned_idents or [])),
+            tuple(sorted(changed_fnames or [])),
+            changed_neighbor_depth,
             query or "",
         )
         
@@ -1318,7 +1431,7 @@ class RepoMap:
         
         result = self.get_ranked_tags_map_uncached(
             chat_fnames, other_fnames, max_map_tokens,
-            mentioned_fnames, mentioned_idents, query
+            mentioned_fnames, mentioned_idents, changed_fnames, changed_neighbor_depth, query
         )
         
         self.map_cache[cache_key] = result
@@ -1331,11 +1444,19 @@ class RepoMap:
         max_map_tokens: int,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        changed_fnames: Optional[Set[str]] = None,
+        changed_neighbor_depth: int = 0,
         query: Optional[str] = None,
     ) -> Tuple[Optional[str], FileReport]:
         """Generate the ranked tags map without caching."""
         ranked_tags, file_report = self.get_ranked_tags(
-            chat_fnames, other_fnames, mentioned_fnames, mentioned_idents, query
+            chat_fnames,
+            other_fnames,
+            mentioned_fnames,
+            mentioned_idents,
+            changed_fnames,
+            changed_neighbor_depth,
+            query,
         )
         
         if not ranked_tags:
@@ -1402,6 +1523,8 @@ class RepoMap:
         other_files: List[str] = None,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        changed_fnames: Optional[Set[str]] = None,
+        changed_neighbor_depth: int = 0,
         query: Optional[str] = None,
         force_refresh: bool = False
     ) -> Tuple[Optional[str], FileReport]:
@@ -1416,7 +1539,16 @@ class RepoMap:
         self._uncacheable_tag_failures = set()
             
         # Create empty report for error cases
-        empty_report = FileReport({}, 0, 0, 0, query=query, query_terms=self._extract_query_terms(query))
+        empty_report = FileReport(
+            {},
+            0,
+            0,
+            0,
+            query=query,
+            query_terms=self._extract_query_terms(query),
+            changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
+            changed_neighbor_depth=changed_neighbor_depth,
+        )
         
         if self.max_map_tokens <= 0 or not other_files:
             return None, empty_report
@@ -1435,7 +1567,7 @@ class RepoMap:
             # get_ranked_tags_map returns (map_string, file_report)
             map_string, file_report = self.get_ranked_tags_map(
                 chat_files, other_files, max_map_tokens,
-                mentioned_fnames, mentioned_idents, query, force_refresh
+                mentioned_fnames, mentioned_idents, changed_fnames, changed_neighbor_depth, query, force_refresh
             )
         except RecursionError:
             message = "Disabling repo map, git repo too large?"
@@ -1450,6 +1582,8 @@ class RepoMap:
                 list(self.diagnostics),
                 query=query,
                 query_terms=self._extract_query_terms(query),
+                changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
+                changed_neighbor_depth=changed_neighbor_depth,
             )  # Ensure consistent return type
         
         if map_string is None:

@@ -261,6 +261,54 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("if __name__ == \"__main__\":", map_content)
             self.assertIn("@router.get('/health')", map_content)
 
+    def test_changed_neighbor_mode_surfaces_only_changed_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            changed_file = root / "changed.py"
+            neighbor_file = root / "neighbor.py"
+            unrelated_file = root / "unrelated.py"
+            for path in (changed_file, neighbor_file, unrelated_file):
+                path.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "changed.py": [
+                    Tag("changed.py", str(changed_file), 1, "Changed", "def"),
+                    Tag("changed.py", str(changed_file), 2, "Shared", "ref"),
+                ],
+                "neighbor.py": [
+                    Tag("neighbor.py", str(neighbor_file), 1, "Shared", "def"),
+                ],
+                "unrelated.py": [
+                    Tag("unrelated.py", str(unrelated_file), 1, "Other", "def"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(changed_file), str(neighbor_file), str(unrelated_file)],
+                max_map_tokens=4096,
+                changed_fnames={str(changed_file)},
+                changed_neighbor_depth=1,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertEqual(file_report.changed_files, ["changed.py"])
+            self.assertEqual(file_report.changed_neighbor_depth, 1)
+            self.assertIn("changed.py", by_path)
+            self.assertIn("neighbor.py", by_path)
+            self.assertNotIn("unrelated.py", by_path)
+            self.assertTrue(by_path["changed.py"].is_changed_file)
+            self.assertEqual(by_path["changed.py"].changed_neighbor_distance, 0)
+            self.assertEqual(by_path["neighbor.py"].changed_neighbor_distance, 1)
+            self.assertEqual(by_path["neighbor.py"].related_changed_files, ["changed.py"])
+            self.assertIn("changed_file", {reason.code for reason in by_path["changed.py"].reasons})
+            self.assertIn("changed_neighbor", {reason.code for reason in by_path["neighbor.py"].reasons})
+            self.assertIn("neighbor.py:", map_content)
+            self.assertNotIn("unrelated.py:", map_content)
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
@@ -460,6 +508,41 @@ class CliPathResolutionTests(unittest.TestCase):
 
             self.assertEqual([Path(path).name for path in captured["other_files"]], ["changed.py"])
 
+    def test_cli_changed_neighbors_passes_full_scope_and_changed_focus(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            changed = root / "changed.py"
+            neighbor = root / "neighbor.py"
+            changed.write_text("CHANGED = 1\n", encoding="utf-8")
+            neighbor.write_text("NEIGHBOR = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+            changed.write_text("CHANGED = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                captured["other_files"] = other_files
+                captured["changed_fnames"] = kwargs.get("changed_fnames")
+                captured["changed_neighbor_depth"] = kwargs.get("changed_neighbor_depth")
+                return None, FileReport({}, 0, 0, len(other_files or []))
+
+            with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    ["repomap.py", "--root", str(root), "--changed-neighbors", "1"],
+                ):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        repomap.main()
+
+            self.assertEqual(
+                sorted(Path(path).name for path in captured["other_files"]),
+                ["changed.py", "neighbor.py"],
+            )
+            self.assertEqual({Path(path).name for path in captured["changed_fnames"]}, {"changed.py"})
+            self.assertEqual(captured["changed_neighbor_depth"], 1)
+
     def test_cli_can_emit_json_output_with_ranked_file_reasons(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -546,6 +629,39 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(captured["query"], "auth")
             self.assertEqual(result["report"]["query"], "auth")
             self.assertEqual(result["report"]["query_terms"], ["auth"])
+
+    def test_repo_map_passes_changed_neighbors_to_repo_mapper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            changed_file = root / "changed.py"
+            neighbor_file = root / "neighbor.py"
+            changed_file.write_text("value = 1\n", encoding="utf-8")
+            neighbor_file.write_text("value = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, **kwargs):
+                captured["changed_fnames"] = kwargs.get("changed_fnames")
+                captured["changed_neighbor_depth"] = kwargs.get("changed_neighbor_depth")
+                return "changed.py:\n(Rank value: 1.0000)\n\n1: value = 1", FileReport(
+                    excluded={},
+                    definition_matches=0,
+                    reference_matches=0,
+                    total_files_considered=2,
+                    changed_files=["changed.py"],
+                    changed_neighbor_depth=1,
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(changed_file), str(neighbor_file)]):
+                    with mock.patch.object(repomap_server, "get_changed_files", return_value=git_support.GitFileSelectionResult(files=[str(changed_file)])):
+                        with mock.patch.object(RepoMap, "get_repo_map", new=fake_get_repo_map):
+                            result = asyncio.run(repomap_server.repo_map(str(root), changed_neighbors=1))
+
+            self.assertEqual({Path(path).name for path in captured["changed_fnames"]}, {"changed.py"})
+            self.assertEqual(captured["changed_neighbor_depth"], 1)
+            self.assertEqual(result["report"]["changed_files"], ["changed.py"])
+            self.assertEqual(result["report"]["changed_neighbor_depth"], 1)
 
 
 class GitSupportTests(unittest.TestCase):

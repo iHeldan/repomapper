@@ -13,7 +13,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 5. **Biases** ranking toward task-relevant files when you provide a free-form query
 6. **Surfaces** nearby related tests for highly relevant source files
 7. **Elevates** entrypoints and public API surfaces so agents can find where execution starts
-8. **Compresses** the output to fit within a token budget (default 8192 tokens)
+8. **Expands** git-changed views with nearby impact neighbors when needed
+9. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -72,6 +73,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Free-form queries can bias ranking toward matching file paths and symbol names, with explicit `query_path_match` and `query_symbol_match` reasons in the report
 - Nearby test files can be lifted into the map even when they lack parser definitions, with `related_tests` / `related_source` reasons in the report
 - Entrypoints and public API files get automatic heuristic boosts and synthetic highlights, with `entrypoint_file` / `public_api_file` reasons in the report
+- Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 
 ## Supported languages
 
@@ -125,6 +127,9 @@ repomap --root /path/to/project --changed
 # Compare the current branch against a git base ref
 repomap --root /path/to/project --changed --base-ref origin/main
 
+# Include immediate graph neighbors around changed files
+repomap --root /path/to/project --changed-neighbors 1
+
 # Bias ranking toward a task like auth debugging or payment flow tracing
 repomap --root /path/to/project --query "auth login flow"
 
@@ -142,6 +147,7 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 
 - `ranked_files`: ranked file entries with scores, sample symbols, neighbor files, lines of interest, and machine-readable reasons
 - `query` / `query_terms`: the task prompt used for query-aware ranking plus the extracted ranking terms
+- `changed_files` / `changed_neighbor_depth`: the changed-file focus set and the neighbor expansion depth used for impact views
 - `related_tests` / `related_sources`: heuristic source-to-test relationships to help agents find validating coverage quickly
 - `entrypoint_signals` / `public_api_signals`: heuristics explaining why a file looks like an app entrypoint or public API surface
 - `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
@@ -169,6 +175,7 @@ Security note: the bundled MCP server only accepts `project_root` values under `
 
 You can also ask the MCP tool to download missing parser runtimes by passing `download_missing_parsers=true`.
 For change-focused workflows, pass `changed_only=true` and optionally `base_ref="origin/main"` to restrict the map to git-changed files.
+For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include nearby graph neighbors around those changed files.
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 
