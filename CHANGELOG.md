@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - MCP callers can opt back into the full ranked file list with `ranked_files_limit=0`, or suppress detailed ranked file rows entirely with `include_ranked_files=false`
 - MCP `repo_map` now also trims large `excluded` dictionaries by default, adds `excluded_total` / `excluded_preview` / `excluded_reason_counts` summary metadata, and lets callers opt back into full excluded rows with `excluded_limit=0`
 - Repo config glob matching now handles recursive subtree patterns like `opensrc/**` correctly instead of only matching the first nested segment
+- Repo map ranking now softens entrypoint/public-API boosts inside test directories so factory/mock barrel files remain visible without outranking primary production surfaces
 
 ## 0.2.1 - 2026-04-06
 

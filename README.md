@@ -83,6 +83,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Free-form queries can bias ranking toward matching file paths and symbol names, with explicit `query_path_match` and `query_symbol_match` reasons in the report
 - Nearby test files can be lifted into the map even when they lack parser definitions, with `related_tests` / `related_source` reasons in the report
 - Entrypoints and public API files get automatic heuristic boosts and synthetic highlights, with `entrypoint_file` / `public_api_file` reasons in the report
+- Test-only entrypoint/public-API barrels still stay visible, but their role boost is softer than production surfaces so `test/factories/index.ts`-style helpers do not crowd out the top of the default map
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships

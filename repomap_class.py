@@ -96,6 +96,8 @@ PUBLIC_API_FILENAMES = {
     "urls.py", "urls.ts", "urls.js",
 }
 PUBLIC_API_DIR_NAMES = {"api", "apis", "route", "routes", "router", "routers", "public"}
+TEST_SURFACE_ROLE_BOOST_DAMPING = 0.35
+TEST_SURFACE_ROLE_FLOOR_DAMPING = 0.25
 
 # Tag namedtuple for storing parsed code definitions and references
 Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
@@ -551,6 +553,7 @@ class RepoMap:
 
     def _get_role_rank_context(
         self,
+        is_test_file: bool,
         entrypoint_signals: List[str],
         public_api_signals: List[str],
     ) -> Tuple[float, float]:
@@ -562,11 +565,19 @@ class RepoMap:
         if entrypoint_signals:
             entrypoint_boost = min(1.5 + (0.15 * max(len(entrypoint_signals) - 1, 0)), 2.0)
             entrypoint_floor = 0.05 + (0.01 * min(len(entrypoint_signals), 3))
+            if is_test_file:
+                # Keep test-facing entrypoint barrels visible without letting factory/mock
+                # indexes crowd out production surfaces in default repo maps.
+                entrypoint_boost = 1.0 + ((entrypoint_boost - 1.0) * TEST_SURFACE_ROLE_BOOST_DAMPING)
+                entrypoint_floor *= TEST_SURFACE_ROLE_FLOOR_DAMPING
             boost *= self._scale_multiplier(entrypoint_boost, weights.entrypoint)
             rank_floor = max(rank_floor, self._scale_floor(entrypoint_floor, weights.entrypoint))
         if public_api_signals:
             public_api_boost = min(1.3 + (0.1 * max(len(public_api_signals) - 1, 0)), 1.8)
             public_api_floor = 0.035 + (0.005 * min(len(public_api_signals), 3))
+            if is_test_file:
+                public_api_boost = 1.0 + ((public_api_boost - 1.0) * TEST_SURFACE_ROLE_BOOST_DAMPING)
+                public_api_floor *= TEST_SURFACE_ROLE_FLOOR_DAMPING
             boost *= self._scale_multiplier(public_api_boost, weights.public_api)
             rank_floor = max(rank_floor, self._scale_floor(public_api_floor, weights.public_api))
 
@@ -3755,6 +3766,7 @@ class RepoMap:
                 query_symbol_matches_by_file.get(rel_fname, []),
             )
             role_floor, role_boost = self._get_role_rank_context(
+                is_test_file_by_rel.get(rel_fname, False),
                 entrypoint_signals_by_file.get(rel_fname, []),
                 public_api_signals_by_file.get(rel_fname, []),
             )

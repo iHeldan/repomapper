@@ -540,6 +540,37 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("if __name__ == \"__main__\":", map_content)
             self.assertIn("@router.get('/health')", map_content)
 
+    def test_test_surface_indexes_get_softer_role_boost_than_production_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            prod_index = root / "index.ts"
+            test_index = root / "test" / "factories" / "index.ts"
+            test_index.parent.mkdir(parents=True, exist_ok=True)
+            prod_index.write_text("export const createClient = () => 1\n", encoding="utf-8")
+            test_index.write_text("export const buildFactory = () => 1\n", encoding="utf-8")
+
+            tags_by_name = {
+                "index.ts": [Tag("index.ts", str(prod_index), 1, "createClient", "def")],
+                "test/factories/index.ts": [Tag("test/factories/index.ts", str(test_index), 1, "buildFactory", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[rel_fname]
+
+            _, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(prod_index), str(test_index)],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertTrue(by_path["index.ts"].is_entrypoint_file)
+            self.assertTrue(by_path["index.ts"].is_public_api_file)
+            self.assertTrue(by_path["test/factories/index.ts"].is_test_file)
+            self.assertTrue(by_path["test/factories/index.ts"].is_entrypoint_file)
+            self.assertTrue(by_path["test/factories/index.ts"].is_public_api_file)
+            self.assertGreater(by_path["index.ts"].rank, by_path["test/factories/index.ts"].rank)
+
     def test_changed_neighbor_mode_surfaces_only_changed_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
