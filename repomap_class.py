@@ -309,6 +309,75 @@ class ImpactReport:
     error: Optional[str] = None
 
 
+@dataclass
+class ReviewChangedFile:
+    path: str
+    target_role: str
+    changed_lines: List[int] = field(default_factory=list)
+    changed_hunks: List["ImpactHunk"] = field(default_factory=list)
+    changed_symbols: List[str] = field(default_factory=list)
+    related_tests: List[str] = field(default_factory=list)
+    entrypoint_signals: List[str] = field(default_factory=list)
+    public_api_signals: List[str] = field(default_factory=list)
+    summary_kind: Optional[str] = None
+    summary_items: List[str] = field(default_factory=list)
+    is_test_file: bool = False
+    is_entrypoint_file: bool = False
+    is_public_api_file: bool = False
+    is_important_file: bool = False
+
+
+@dataclass
+class ReviewFocusItem:
+    priority: int
+    kind: str
+    title: str
+    target: str
+    target_role: str
+    message: str
+    risk_level: str = "low"
+    confidence: float = 0.5
+    location_hint: Optional[str] = None
+    command_hint: Optional[str] = None
+    focus_symbols: List[str] = field(default_factory=list)
+    why_now: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    follow_if_true: Optional[str] = None
+    follow_if_false: Optional[str] = None
+    seed_file: Optional[str] = None
+    path_from_seed: List[str] = field(default_factory=list)
+    anchor_file: Optional[str] = None
+    anchor_line: Optional[int] = None
+    anchor_symbol: Optional[str] = None
+    anchor_kind: Optional[str] = None
+
+
+@dataclass
+class ReviewReport:
+    current_branch: Optional[str]
+    base_ref: Optional[str]
+    max_depth: int
+    max_results: int
+    changed_files: List[ReviewChangedFile] = field(default_factory=list)
+    changed_lines_by_file: Dict[str, List[int]] = field(default_factory=dict)
+    changed_hunks_by_file: Dict[str, List["ImpactHunk"]] = field(default_factory=dict)
+    changed_seed_symbols: Dict[str, List[str]] = field(default_factory=dict)
+    impacted_files: List[ImpactTarget] = field(default_factory=list)
+    shared_symbols: List[ImpactSymbol] = field(default_factory=list)
+    quick_actions: List[ImpactQuickAction] = field(default_factory=list)
+    edit_candidates: List[ImpactEditCandidate] = field(default_factory=list)
+    edit_plan: List[ImpactEditPlanStep] = field(default_factory=list)
+    test_clusters: List[ImpactTestCluster] = field(default_factory=list)
+    suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
+    review_focus: List[ReviewFocusItem] = field(default_factory=list)
+    changed_public_api_files: List[str] = field(default_factory=list)
+    changed_entrypoint_files: List[str] = field(default_factory=list)
+    changed_test_files: List[str] = field(default_factory=list)
+    changed_config_files: List[str] = field(default_factory=list)
+    diagnostics: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
 
 # Constants
 CACHE_VERSION = 1
@@ -1856,6 +1925,397 @@ class RepoMap:
                 f"No impacted files were found within {max_depth} hop(s) of {', '.join(seed_rel_files)}."
             )
         report.diagnostics = diagnostics
+        return report
+
+    def _classify_review_target_role(
+        self,
+        *,
+        is_test_file: bool,
+        is_entrypoint_file: bool,
+        is_public_api_file: bool,
+        summary_kind: Optional[str],
+    ) -> str:
+        """Classify a changed file into the review lane it most belongs to."""
+        if is_test_file:
+            return "test"
+        if summary_kind == "config":
+            return "config"
+        if is_public_api_file:
+            return "public_api"
+        if is_entrypoint_file:
+            return "entrypoint"
+        return "boundary"
+
+    def _build_review_changed_files(
+        self,
+        changed_rel_files: List[str],
+        rel_to_abs: Dict[str, str],
+        known_rel_fnames: Set[str],
+        changed_lines_by_file: Dict[str, List[int]],
+        changed_hunks_by_file: Dict[str, List["ImpactHunk"]],
+        changed_seed_symbols: Dict[str, List[str]],
+    ) -> List[ReviewChangedFile]:
+        """Summarize the changed files that anchor a review session."""
+        changed_files = []
+        for rel_fname in changed_rel_files:
+            abs_fname = rel_to_abs.get(rel_fname)
+            if not abs_fname:
+                continue
+
+            path_entrypoint_signals, path_public_api_signals = self._get_path_role_signals(rel_fname)
+            runtime_entrypoint_signals, runtime_public_api_signals, _ = self._get_runtime_role_metadata(
+                abs_fname,
+                rel_fname,
+            )
+            entrypoint_signals = self._dedupe_preserve_order(path_entrypoint_signals + runtime_entrypoint_signals)
+            public_api_signals = self._dedupe_preserve_order(path_public_api_signals + runtime_public_api_signals)
+            is_test_file = self._is_test_file(rel_fname)
+            summary_kind, summary_items = self._extract_file_summary(abs_fname, rel_fname)
+            related_tests = self._find_related_test_files(rel_fname, known_rel_fnames)
+            changed_files.append(
+                ReviewChangedFile(
+                    path=rel_fname,
+                    target_role=self._classify_review_target_role(
+                        is_test_file=is_test_file,
+                        is_entrypoint_file=bool(entrypoint_signals),
+                        is_public_api_file=bool(public_api_signals),
+                        summary_kind=summary_kind,
+                    ),
+                    changed_lines=changed_lines_by_file.get(rel_fname, [])[:20],
+                    changed_hunks=changed_hunks_by_file.get(rel_fname, [])[:8],
+                    changed_symbols=changed_seed_symbols.get(rel_fname, [])[:8],
+                    related_tests=related_tests[:5],
+                    entrypoint_signals=entrypoint_signals[:5],
+                    public_api_signals=public_api_signals[:5],
+                    summary_kind=summary_kind,
+                    summary_items=summary_items[:5],
+                    is_test_file=is_test_file,
+                    is_entrypoint_file=bool(entrypoint_signals),
+                    is_public_api_file=bool(public_api_signals),
+                    is_important_file=self._is_important_file(rel_fname),
+                )
+            )
+
+        role_priority = {"public_api": 0, "entrypoint": 1, "config": 2, "test": 3, "boundary": 4}
+        changed_files.sort(key=lambda item: (role_priority.get(item.target_role, 9), item.path))
+        return changed_files
+
+    def _build_review_focus(
+        self,
+        changed_files: List[ReviewChangedFile],
+        impact_report: ImpactReport,
+    ) -> List[ReviewFocusItem]:
+        """Build a review-first queue that combines changed surfaces and impact heuristics."""
+        focus_items = []
+        seen = set()
+
+        def add_focus(
+            *,
+            priority: int,
+            kind: str,
+            title: str,
+            target: str,
+            target_role: str,
+            message: str,
+            risk_level: str = "low",
+            confidence: float = 0.5,
+            location_hint: Optional[str] = None,
+            command_hint: Optional[str] = None,
+            focus_symbols: Optional[List[str]] = None,
+            why_now: Optional[str] = None,
+            expected_outcome: Optional[str] = None,
+            follow_if_true: Optional[str] = None,
+            follow_if_false: Optional[str] = None,
+            seed_file: Optional[str] = None,
+            path_from_seed: Optional[List[str]] = None,
+            anchor_file: Optional[str] = None,
+            anchor_line: Optional[int] = None,
+            anchor_symbol: Optional[str] = None,
+            anchor_kind: Optional[str] = None,
+        ) -> None:
+            key = (kind, target)
+            if key in seen:
+                return
+            seen.add(key)
+            focus_items.append(
+                ReviewFocusItem(
+                    priority=priority,
+                    kind=kind,
+                    title=title,
+                    target=target,
+                    target_role=target_role,
+                    message=message,
+                    risk_level=risk_level,
+                    confidence=round(confidence, 2),
+                    location_hint=location_hint,
+                    command_hint=command_hint,
+                    focus_symbols=(focus_symbols or [])[:3],
+                    why_now=why_now,
+                    expected_outcome=expected_outcome,
+                    follow_if_true=follow_if_true,
+                    follow_if_false=follow_if_false,
+                    seed_file=seed_file,
+                    path_from_seed=(path_from_seed or [])[:],
+                    anchor_file=anchor_file,
+                    anchor_line=anchor_line,
+                    anchor_symbol=anchor_symbol,
+                    anchor_kind=anchor_kind,
+                )
+            )
+
+        for changed_file in changed_files:
+            location_hint = None
+            anchor_line = changed_file.changed_lines[0] if changed_file.changed_lines else None
+            if anchor_line:
+                location_hint = f"{changed_file.path}:{anchor_line}"
+            focus_symbols = changed_file.changed_symbols[:3]
+
+            if changed_file.is_public_api_file:
+                add_focus(
+                    priority=0,
+                    kind="review_changed_public_api",
+                    title="Check changed public API",
+                    target=changed_file.path,
+                    target_role="public_api",
+                    message="This change lands on a public surface that can fan out quickly across callers.",
+                    risk_level="medium",
+                    confidence=0.94,
+                    location_hint=location_hint or changed_file.path,
+                    focus_symbols=focus_symbols,
+                    why_now="Public API changes are the fastest way to spot downstream contract risk.",
+                    expected_outcome="Confirm whether the exported signature, route shape, or boundary behavior changed.",
+                    follow_if_true="If the contract changed, review impacted callers, tests, and entrypoints next.",
+                    follow_if_false="If the contract stayed stable, move to the closest impacted boundary or test.",
+                    anchor_file=changed_file.path,
+                    anchor_line=anchor_line,
+                    anchor_symbol=focus_symbols[0] if focus_symbols else None,
+                    anchor_kind="file",
+                )
+            if changed_file.is_entrypoint_file:
+                add_focus(
+                    priority=0,
+                    kind="review_changed_entrypoint",
+                    title="Check changed entrypoint",
+                    target=changed_file.path,
+                    target_role="entrypoint",
+                    message="Entrypoint changes can redirect execution before downstream impact becomes obvious.",
+                    risk_level="medium",
+                    confidence=0.9,
+                    location_hint=location_hint or changed_file.path,
+                    focus_symbols=focus_symbols,
+                    why_now="Execution-flow changes are easiest to validate at the boundary where they begin.",
+                    expected_outcome="Confirm whether the startup, CLI, server, or routing flow now reaches different code paths.",
+                    follow_if_true="If the flow changed, inspect the nearest impacted boundary and related tests next.",
+                    follow_if_false="If the flow is unchanged, continue with the highest-confidence impacted boundary.",
+                    anchor_file=changed_file.path,
+                    anchor_line=anchor_line,
+                    anchor_symbol=focus_symbols[0] if focus_symbols else None,
+                    anchor_kind="file",
+                )
+            if changed_file.summary_kind == "config":
+                add_focus(
+                    priority=1,
+                    kind="review_changed_config",
+                    title="Check changed config",
+                    target=changed_file.path,
+                    target_role="config",
+                    message="Config drift can invalidate the rest of the review path quickly.",
+                    risk_level="medium",
+                    confidence=0.82,
+                    location_hint=location_hint or changed_file.path,
+                    focus_symbols=focus_symbols,
+                    why_now="A config change can explain multiple downstream effects at once.",
+                    expected_outcome="Confirm whether configuration changes alter tests, entrypoints, or boundary assumptions.",
+                    follow_if_true="If config changed behavior, review dependent entrypoints and tests immediately.",
+                    follow_if_false="If config is neutral, continue with the closest impacted code boundary.",
+                    anchor_file=changed_file.path,
+                    anchor_line=anchor_line,
+                    anchor_symbol=focus_symbols[0] if focus_symbols else None,
+                    anchor_kind="file",
+                )
+            if changed_file.is_test_file:
+                add_focus(
+                    priority=1,
+                    kind="review_changed_test",
+                    title="Check changed test",
+                    target=changed_file.path,
+                    target_role="test",
+                    message="A changed test often encodes the intended behavior shift or the regression being fixed.",
+                    risk_level="low",
+                    confidence=0.84,
+                    location_hint=location_hint or changed_file.path,
+                    command_hint=self._suggest_test_command(changed_file.path),
+                    focus_symbols=focus_symbols,
+                    why_now="Changed tests usually clarify expected behavior faster than reading implementation code first.",
+                    expected_outcome="Confirm what behavior is newly expected or what regression is being guarded.",
+                    follow_if_true="If the expectation changed, inspect the nearest impacted implementation boundary next.",
+                    follow_if_false="If the test only refactors setup, continue with the strongest code-side impact target.",
+                    anchor_file=changed_file.path,
+                    anchor_line=anchor_line,
+                    anchor_symbol=focus_symbols[0] if focus_symbols else None,
+                    anchor_kind="file",
+                )
+
+        for action in impact_report.quick_actions:
+            title = {
+                "open_changed_boundary": "Inspect changed boundary",
+                "run_nearby_test": "Run nearby test",
+                "check_config_assumption": "Check config assumption",
+                "open_direct_neighbor": "Inspect direct neighbor",
+                "start_here": "Start with anchored boundary",
+            }.get(action.kind, "Inspect impacted boundary")
+            add_focus(
+                priority=action.priority + 2,
+                kind=action.kind,
+                title=title,
+                target=action.target,
+                target_role=action.target_role,
+                message=action.message,
+                risk_level=action.risk_level,
+                confidence=action.confidence,
+                location_hint=action.location_hint,
+                command_hint=action.command_hint,
+                focus_symbols=action.focus_symbols,
+                why_now=action.why_now,
+                expected_outcome=action.expected_outcome,
+                follow_if_true=action.follow_if_true,
+                follow_if_false=action.follow_if_false,
+                seed_file=action.seed_file,
+                path_from_seed=action.path_from_seed,
+                anchor_file=action.anchor_file,
+                anchor_line=action.anchor_line,
+                anchor_symbol=action.anchor_symbol,
+                anchor_kind=action.anchor_kind,
+            )
+
+        for cluster in impact_report.test_clusters:
+            if not cluster.paths:
+                continue
+            cluster_title = {
+                "sibling": "Run sibling test cluster",
+                "nearby": "Run nearby test cluster",
+                "integration": "Run integration test cluster",
+            }.get(cluster.kind, "Run impacted test cluster")
+            add_focus(
+                priority=3 if cluster.kind == "sibling" else 4,
+                kind=f"review_{cluster.kind}_test_cluster",
+                title=cluster_title,
+                target=cluster.paths[0],
+                target_role="test",
+                message=cluster.reason or "Validate the affected change set with the closest related tests.",
+                risk_level="low",
+                confidence=0.8 if cluster.kind == "sibling" else 0.74,
+                location_hint=cluster.paths[0],
+                command_hint=cluster.command_hint,
+                focus_symbols=cluster.focus_symbols,
+                why_now="Grouped test validation can confirm the impact trail quickly before deeper review.",
+                expected_outcome="Confirm whether the closest validating tests still pass or reveal the broken boundary.",
+                follow_if_true="If the cluster reveals failures, inspect the matching impacted boundary immediately.",
+                follow_if_false="If the cluster passes, continue with the next highest-risk changed surface.",
+                seed_file=cluster.seed_file,
+            )
+
+        role_priority = {"public_api": 0, "entrypoint": 1, "config": 2, "test": 3, "boundary": 4, "neighbor": 5}
+        focus_items.sort(
+            key=lambda item: (
+                item.priority,
+                role_priority.get(item.target_role, 9),
+                -item.confidence,
+                item.target,
+            )
+        )
+        return focus_items[:10]
+
+    def build_review_report(
+        self,
+        changed_files: List[str],
+        files: Optional[List[str]] = None,
+        current_branch: Optional[str] = None,
+        base_ref: Optional[str] = None,
+        max_depth: int = 2,
+        max_results: int = 10,
+        changed_lines_by_file: Optional[Dict[str, List[int]]] = None,
+    ) -> ReviewReport:
+        """Combine git changes, impact analysis, test clusters, and review priorities."""
+        changed_files = list(dict.fromkeys(changed_files or []))
+        report = ReviewReport(
+            current_branch=current_branch,
+            base_ref=base_ref,
+            max_depth=max_depth,
+            max_results=max_results,
+        )
+        if not changed_files:
+            report.error = "At least one changed file is required for review mode."
+            report.diagnostics = list(self.repo_config.diagnostics)
+            return report
+
+        candidate_files = files or self._find_repo_files()
+        all_fnames = self._prepare_candidate_files(candidate_files)
+        abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
+        rel_to_abs = {rel_fname: fname for fname, rel_fname in abs_to_rel.items()}
+        changed_abs_files = [os.path.abspath(path) for path in changed_files]
+        changed_rel_files = [abs_to_rel[path] for path in changed_abs_files if path in abs_to_rel]
+        missing_changed_files = [
+            self.get_rel_fname(path)
+            for path in changed_abs_files
+            if path not in abs_to_rel
+        ]
+        if missing_changed_files:
+            report.error = (
+                "Changed file(s) are not in the selected repository scope: "
+                + ", ".join(missing_changed_files)
+            )
+            report.diagnostics = list(self.repo_config.diagnostics)
+            return report
+
+        impact_report = self.analyze_file_impact(
+            changed_abs_files,
+            files=all_fnames,
+            max_depth=max_depth,
+            max_results=max_results,
+            changed_lines_by_file=changed_lines_by_file,
+        )
+        if impact_report.error:
+            report.error = impact_report.error
+            report.diagnostics = impact_report.diagnostics[:]
+            return report
+
+        known_rel_fnames = set(abs_to_rel.values())
+        changed_file_details = self._build_review_changed_files(
+            changed_rel_files,
+            rel_to_abs,
+            known_rel_fnames,
+            impact_report.changed_lines_by_file,
+            impact_report.changed_hunks_by_file,
+            impact_report.changed_seed_symbols,
+        )
+        report.changed_files = changed_file_details
+        report.changed_lines_by_file = impact_report.changed_lines_by_file.copy()
+        report.changed_hunks_by_file = {
+            rel_fname: hunks[:]
+            for rel_fname, hunks in impact_report.changed_hunks_by_file.items()
+        }
+        report.changed_seed_symbols = {
+            rel_fname: symbols[:]
+            for rel_fname, symbols in impact_report.changed_seed_symbols.items()
+        }
+        report.impacted_files = impact_report.impacted_files[:]
+        report.shared_symbols = impact_report.shared_symbols[:]
+        report.quick_actions = impact_report.quick_actions[:]
+        report.edit_candidates = impact_report.edit_candidates[:]
+        report.edit_plan = impact_report.edit_plan[:]
+        report.test_clusters = impact_report.test_clusters[:]
+        report.suggested_checks = impact_report.suggested_checks[:]
+        report.changed_public_api_files = [item.path for item in changed_file_details if item.is_public_api_file]
+        report.changed_entrypoint_files = [item.path for item in changed_file_details if item.is_entrypoint_file]
+        report.changed_test_files = [item.path for item in changed_file_details if item.is_test_file]
+        report.changed_config_files = [item.path for item in changed_file_details if item.summary_kind == "config"]
+        report.review_focus = self._build_review_focus(changed_file_details, impact_report)
+        report.diagnostics = impact_report.diagnostics[:]
+        if current_branch:
+            report.diagnostics.append(f"Reviewing branch {current_branch}.")
+        if base_ref:
+            report.diagnostics.append(f"Compared against base ref {base_ref}.")
         return report
 
     def _build_impact_symbols(

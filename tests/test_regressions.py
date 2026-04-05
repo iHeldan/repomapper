@@ -869,6 +869,63 @@ class RepoMapRankingTests(unittest.TestCase):
         self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", None), "neighbor")
 
 
+class RepoMapReviewTests(unittest.TestCase):
+    def test_build_review_report_combines_changed_surfaces_and_impact_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            routes_dir = root / "api"
+            tests_dir = root / "tests"
+            routes_dir.mkdir(parents=True, exist_ok=True)
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            routes_file = routes_dir / "routes.py"
+            service_file = root / "service.py"
+            test_file = tests_dir / "test_service.py"
+            (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+
+            app_file.write_text("from service import Service\n\nService()\n", encoding="utf-8")
+            routes_file.write_text("from service import Service\n\nService()\n", encoding="utf-8")
+            service_file.write_text("class Service:\n    pass\n", encoding="utf-8")
+            test_file.write_text("from service import Service\n\ndef test_service():\n    Service()\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [Tag("app.py", str(app_file), 3, "Service", "ref")],
+                "routes.py": [Tag("api/routes.py", str(routes_file), 3, "Service", "ref")],
+                "service.py": [Tag("service.py", str(service_file), 1, "Service", "def")],
+                "test_service.py": [Tag("tests/test_service.py", str(test_file), 4, "Service", "ref")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.build_review_report(
+                [str(app_file), str(routes_file)],
+                files=[str(app_file), str(routes_file), str(service_file), str(test_file)],
+                current_branch="feature/review",
+                base_ref="origin/main",
+                max_depth=2,
+                max_results=6,
+                changed_lines_by_file={
+                    str(app_file): [3],
+                    str(routes_file): [3],
+                },
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual(report.current_branch, "feature/review")
+            self.assertEqual(report.base_ref, "origin/main")
+            self.assertEqual(report.changed_public_api_files, ["api/routes.py"])
+            self.assertEqual(report.changed_entrypoint_files, ["app.py"])
+            self.assertEqual([item.path for item in report.changed_files], ["api/routes.py", "app.py"])
+            focus_kinds = [item.kind for item in report.review_focus]
+            self.assertEqual(focus_kinds[:2], ["review_changed_public_api", "review_changed_entrypoint"])
+            self.assertIn("open_changed_boundary", focus_kinds)
+            self.assertEqual(report.review_focus[0].target_role, "public_api")
+            self.assertEqual(report.review_focus[0].location_hint, "api/routes.py:3")
+            self.assertEqual(report.test_clusters[0].kind, "sibling")
+            self.assertEqual(report.test_clusters[0].command_hint, "pytest tests/test_service.py")
+
+
 class RepoMapConfigTests(unittest.TestCase):
     def test_repo_config_scopes_files_and_keeps_custom_important_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1734,6 +1791,98 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertIn("working tree", payload["diagnostics"][0].lower())
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_cli_review_mode_can_emit_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            changed_file = root / "api.py"
+            changed_file.write_text("value = 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_build_review_report(
+                self,
+                changed_files,
+                files=None,
+                current_branch=None,
+                base_ref=None,
+                max_depth=2,
+                max_results=10,
+                changed_lines_by_file=None,
+            ):
+                captured["changed_files"] = changed_files
+                captured["files"] = files
+                captured["current_branch"] = current_branch
+                captured["base_ref"] = base_ref
+                captured["changed_lines_by_file"] = changed_lines_by_file
+                return repomap_class.ReviewReport(
+                    current_branch=current_branch,
+                    base_ref=base_ref,
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    changed_files=[
+                        repomap_class.ReviewChangedFile(
+                            path="api.py",
+                            target_role="public_api",
+                            changed_lines=[1],
+                            is_public_api_file=True,
+                        )
+                    ],
+                    changed_public_api_files=["api.py"],
+                    review_focus=[
+                        repomap_class.ReviewFocusItem(
+                            priority=0,
+                            kind="review_changed_public_api",
+                            title="Check changed public API",
+                            target="api.py",
+                            target_role="public_api",
+                            message="Check the changed exported boundary first.",
+                            confidence=0.93,
+                            risk_level="medium",
+                            location_hint="api.py:1",
+                        )
+                    ],
+                    diagnostics=["Reviewing branch feature/review."],
+                )
+
+            fake_git_result = git_support.GitFileSelectionResult(
+                files=[str(changed_file)],
+                changed_lines={str(changed_file): [1]},
+                diagnostics=["Included staged, unstaged, and untracked changes from the working tree."],
+            )
+
+            with mock.patch.object(repomap, "get_changed_files", return_value=fake_git_result):
+                with mock.patch.object(repomap, "get_current_branch", return_value="feature/review"):
+                    with mock.patch.object(repomap.RepoMap, "build_review_report", new=fake_build_review_report):
+                        with mock.patch.object(
+                            sys,
+                            "argv",
+                            [
+                                "repomap.py",
+                                "--root",
+                                str(root),
+                                "--review",
+                                "--base-ref",
+                                "origin/main",
+                                "--output-format",
+                                "json",
+                            ],
+                        ):
+                            stdout = io.StringIO()
+                            stderr = io.StringIO()
+                            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                                repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual([Path(path).name for path in captured["changed_files"]], ["api.py"])
+            self.assertEqual(captured["current_branch"], "feature/review")
+            self.assertEqual(captured["base_ref"], "origin/main")
+            self.assertEqual(captured["changed_lines_by_file"][str(changed_file)], [1])
+            self.assertEqual(payload["current_branch"], "feature/review")
+            self.assertEqual(payload["changed_public_api_files"], ["api.py"])
+            self.assertEqual(payload["review_focus"][0]["kind"], "review_changed_public_api")
+            self.assertEqual(payload["review_focus"][0]["location_hint"], "api.py:1")
+            self.assertEqual(stderr.getvalue(), "")
+
 
 class RepoMapServerTests(unittest.TestCase):
     def tearDown(self):
@@ -2111,6 +2260,94 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["seed_files"], ["changed.py"])
             self.assertEqual(result["diagnostics"][0], "Collected 1 changed file.")
 
+    def test_review_changes_tool_returns_serialized_review_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            changed_file = root / "api.py"
+            neighbor_file = root / "service.py"
+            changed_file.write_text("value = 1\n", encoding="utf-8")
+            neighbor_file.write_text("value = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_build_review_report(
+                self,
+                changed_files,
+                files=None,
+                current_branch=None,
+                base_ref=None,
+                max_depth=2,
+                max_results=10,
+                changed_lines_by_file=None,
+            ):
+                captured["changed_files"] = changed_files
+                captured["files"] = files
+                captured["current_branch"] = current_branch
+                captured["base_ref"] = base_ref
+                captured["changed_lines_by_file"] = changed_lines_by_file
+                return repomap_class.ReviewReport(
+                    current_branch=current_branch,
+                    base_ref=base_ref,
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    changed_files=[
+                        repomap_class.ReviewChangedFile(
+                            path="api.py",
+                            target_role="public_api",
+                            changed_lines=[1],
+                            is_public_api_file=True,
+                        )
+                    ],
+                    changed_public_api_files=["api.py"],
+                    review_focus=[
+                        repomap_class.ReviewFocusItem(
+                            priority=0,
+                            kind="review_changed_public_api",
+                            title="Check changed public API",
+                            target="api.py",
+                            target_role="public_api",
+                            message="Check the changed exported boundary first.",
+                            confidence=0.93,
+                            risk_level="medium",
+                            location_hint="api.py:1",
+                        )
+                    ],
+                    diagnostics=["Reviewing branch feature/review."],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(changed_file), str(neighbor_file)]):
+                    with mock.patch.object(
+                        repomap_server,
+                        "get_changed_files",
+                        return_value=git_support.GitFileSelectionResult(
+                            files=[str(changed_file)],
+                            changed_lines={str(changed_file): [1]},
+                            diagnostics=["Collected 1 changed file."],
+                        ),
+                    ):
+                        with mock.patch.object(repomap_server, "get_current_branch", return_value="feature/review"):
+                            with mock.patch.object(RepoMap, "build_review_report", new=fake_build_review_report):
+                                result = asyncio.run(
+                                    repomap_server.review_changes(
+                                        str(root),
+                                        base_ref="origin/main",
+                                        max_depth=3,
+                                        max_results=5,
+                                    )
+                                )
+
+            self.assertEqual([Path(path).name for path in captured["changed_files"]], ["api.py"])
+            self.assertEqual(sorted(Path(path).name for path in captured["files"]), ["api.py", "service.py"])
+            self.assertEqual(captured["current_branch"], "feature/review")
+            self.assertEqual(captured["base_ref"], "origin/main")
+            self.assertEqual(captured["changed_lines_by_file"][str(changed_file)], [1])
+            self.assertEqual(result["current_branch"], "feature/review")
+            self.assertEqual(result["changed_public_api_files"], ["api.py"])
+            self.assertEqual(result["review_focus"][0]["kind"], "review_changed_public_api")
+            self.assertEqual(result["review_focus"][0]["location_hint"], "api.py:1")
+            self.assertEqual(result["diagnostics"][0], "Collected 1 changed file.")
+
 
 class GitSupportTests(unittest.TestCase):
     def test_get_changed_files_collects_worktree_changes(self):
@@ -2153,6 +2390,15 @@ class GitSupportTests(unittest.TestCase):
             self.assertIn("HEAD~1", result.diagnostics[0])
             self.assertEqual([Path(path).name for path in result.files], ["changed.py"])
             self.assertEqual(result.changed_lines[str(changed)], [1])
+
+    def test_get_current_branch_returns_current_branch_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+
+            self.assertEqual(git_support.get_current_branch(str(root)), "main")
 
 
 class ParserSupportTests(unittest.TestCase):

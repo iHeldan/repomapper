@@ -184,3 +184,26 @@ def get_changed_files(root: str, base_ref: str | None = None) -> GitFileSelectio
         },
         diagnostics=diagnostics,
     )
+
+
+def get_current_branch(root: str) -> Optional[str]:
+    """Return the current branch name, or a short HEAD sha when detached."""
+    root_path = Path(root).resolve()
+
+    repo_check = _run_git(root_path, ["rev-parse", "--is-inside-work-tree"])
+    if repo_check.returncode != 0:
+        return None
+
+    branch_proc = _run_git(root_path, ["branch", "--show-current"])
+    if branch_proc.returncode == 0:
+        branch_name = branch_proc.stdout.strip()
+        if branch_name:
+            return branch_name
+
+    head_proc = _run_git(root_path, ["rev-parse", "--short", "HEAD"])
+    if head_proc.returncode == 0:
+        short_head = head_proc.stdout.strip()
+        if short_head:
+            return f"detached@{short_head}"
+
+    return None

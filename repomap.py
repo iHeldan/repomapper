@@ -13,10 +13,10 @@ import json
 import sys
 from pathlib import Path
 
-from git_support import get_changed_files
+from git_support import get_changed_files, get_current_branch
 from utils import count_tokens, read_text, find_src_files
 from parser_support import infer_parser_languages, warm_languages
-from repomap_class import RepoMap, ImpactReport
+from repomap_class import RepoMap, ImpactReport, ReviewReport
 
 
 def resolve_repo_path(root_path: Path, path_str: str) -> Path:
@@ -387,6 +387,86 @@ def format_impact_edit_plan(report) -> str:
     return "\n".join(lines)
 
 
+def format_review_report(report) -> str:
+    """Render a review-first view over changed files and their impact radius."""
+    if report.error:
+        lines = [f"Review mode failed: {report.error}"]
+        if report.diagnostics:
+            lines.append("")
+            lines.append("Diagnostics:")
+            lines.extend(f"- {message}" for message in report.diagnostics)
+        return "\n".join(lines)
+
+    branch_label = report.current_branch or "(unknown branch)"
+    compare_label = f" vs {report.base_ref}" if report.base_ref else ""
+    lines = [
+        f"Review mode: {branch_label}{compare_label}",
+        f"Changed files: {len(report.changed_files)}",
+        f"Impacted files: {len(report.impacted_files)}",
+    ]
+
+    if report.changed_public_api_files or report.changed_entrypoint_files or report.changed_config_files or report.changed_test_files:
+        lines.append("")
+        lines.append("Changed surfaces:")
+        if report.changed_public_api_files:
+            lines.append(f"- public API: {', '.join(report.changed_public_api_files[:4])}")
+        if report.changed_entrypoint_files:
+            lines.append(f"- entrypoints: {', '.join(report.changed_entrypoint_files[:4])}")
+        if report.changed_config_files:
+            lines.append(f"- config: {', '.join(report.changed_config_files[:4])}")
+        if report.changed_test_files:
+            lines.append(f"- tests: {', '.join(report.changed_test_files[:4])}")
+
+    if report.changed_files:
+        lines.append("")
+        lines.append("Diff anchors:")
+        for changed_file in report.changed_files[:6]:
+            line_suffix = f" lines {', '.join(str(line) for line in changed_file.changed_lines[:6])}" if changed_file.changed_lines else ""
+            symbol_suffix = f" [{', '.join(changed_file.changed_symbols[:3])}]" if changed_file.changed_symbols else ""
+            lines.append(f"- [{changed_file.target_role}] {changed_file.path}{line_suffix}{symbol_suffix}")
+            if changed_file.related_tests:
+                lines.append(f"  tests: {', '.join(changed_file.related_tests[:3])}")
+
+    if report.review_focus:
+        lines.append("")
+        lines.append("Check first:")
+        for index, item in enumerate(report.review_focus, start=1):
+            lines.append(
+                f"{index}. [{item.target_role}] {item.title} ({item.confidence:.2f}, risk {item.risk_level})"
+            )
+            lines.append(f"   {item.message}")
+            if item.command_hint:
+                lines.append(f"   run: {item.command_hint}")
+            elif item.location_hint:
+                lines.append(f"   open: {item.location_hint}")
+            if item.focus_symbols:
+                lines.append(f"   focus: {', '.join(item.focus_symbols[:3])}")
+            if item.expected_outcome:
+                lines.append(f"   expect: {item.expected_outcome}")
+
+    if report.test_clusters:
+        lines.append("")
+        lines.append("Test clusters:")
+        for cluster in report.test_clusters:
+            lines.append(f"- [{cluster.kind}] {', '.join(cluster.paths[:3])}")
+            if cluster.command_hint:
+                lines.append(f"  run: {cluster.command_hint}")
+
+    if report.impacted_files:
+        lines.append("")
+        lines.append("Closest impact:")
+        for target in report.impacted_files[:5]:
+            lines.append(f"- {target.path} (distance {target.distance}, from {target.seed_file})")
+            if target.boundary_symbols:
+                lines.append(f"  symbols: {', '.join(target.boundary_symbols[:4])}")
+
+    if report.diagnostics:
+        lines.append("")
+        lines.append("Diagnostics:")
+        lines.extend(f"- {message}" for message in report.diagnostics)
+    return "\n".join(lines)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -476,6 +556,12 @@ Examples:
         "--impact-changed",
         action="store_true",
         help="Analyze likely impact radius around git-changed files"
+    )
+
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Review git-changed files with a combined branch/diff/test/public-api/impact view"
     )
 
     parser.add_argument(
@@ -579,8 +665,9 @@ Examples:
         'error': tool_error
     }
     
-    map_changed_mode = args.changed or args.changed_neighbors > 0 or (bool(args.base_ref) and not args.impact_changed)
+    map_changed_mode = args.changed or args.changed_neighbors > 0 or (bool(args.base_ref) and not args.impact_changed and not args.review)
     impact_mode = bool(args.impact_from) or args.impact_changed
+    review_mode = args.review
 
     # Process file arguments
     root_path = Path(args.root).resolve()
@@ -611,11 +698,14 @@ Examples:
     if args.impact_changed and impact_from:
         tool_error("Use either --impact-from or --impact-changed, not both.")
         sys.exit(1)
-    if trace_from and impact_mode:
-        tool_error("Trace mode and impact mode cannot be used together.")
+    if trace_from and (impact_mode or review_mode):
+        tool_error("Trace mode cannot be combined with impact or review mode.")
         sys.exit(1)
     if impact_mode and (args.changed or args.changed_neighbors > 0):
         tool_error("Map-focused changed mode cannot be combined with impact mode. Use --impact-changed and optional --base-ref instead.")
+        sys.exit(1)
+    if review_mode and (impact_mode or args.changed or args.changed_neighbors > 0):
+        tool_error("Review mode cannot be combined with map-focused changed mode or impact mode.")
         sys.exit(1)
     if args.edit_plan and not impact_mode:
         tool_error("--edit-plan can only be used with --impact-from or --impact-changed.")
@@ -624,12 +714,15 @@ Examples:
     git_result = None
     changed_files = []
     impact_seed_files = impact_from[:]
+    review_seed_files = []
+    current_branch = None
 
-    if map_changed_mode or args.impact_changed:
+    if map_changed_mode or args.impact_changed or review_mode:
         git_result = get_changed_files(str(root_path), args.base_ref)
         if git_result.error:
             tool_error(git_result.error)
             sys.exit(1)
+        current_branch = get_current_branch(str(root_path))
 
         changed_set = set(git_result.files)
         if args.verbose:
@@ -656,8 +749,14 @@ Examples:
             if args.verbose:
                 info_handler(f"Impact seed files selected from git: {len(impact_seed_files)}")
 
+        if review_mode:
+            review_seed_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+            review_seed_files = list(dict.fromkeys(review_seed_files))
+            if args.verbose:
+                info_handler(f"Review seed files selected from git: {len(review_seed_files)}")
+
     inferred_parser_languages = infer_parser_languages(
-        chat_files + other_files + impact_seed_files + [path for path in (trace_from, trace_to) if path]
+        chat_files + other_files + impact_seed_files + review_seed_files + [path for path in (trace_from, trace_to) if path]
     )
 
     if args.warm_languages:
@@ -735,6 +834,37 @@ Examples:
                 print(format_impact_edit_plan(impact_report) if args.edit_plan else format_impact_report(impact_report))
 
             if impact_report.error:
+                sys.exit(1)
+            return
+
+        if review_mode:
+            if not review_seed_files:
+                review_report = ReviewReport(
+                    current_branch=current_branch,
+                    base_ref=args.base_ref,
+                    max_depth=args.impact_max_depth,
+                    max_results=args.impact_max_results,
+                    diagnostics=(git_result.diagnostics[:] if git_result else []) + ["No changed files found for review mode."],
+                )
+            else:
+                review_report = repo_map.build_review_report(
+                    review_seed_files,
+                    files=other_files,
+                    current_branch=current_branch,
+                    base_ref=args.base_ref,
+                    max_depth=args.impact_max_depth,
+                    max_results=args.impact_max_results,
+                    changed_lines_by_file=(git_result.changed_lines if git_result else None),
+                )
+                if git_result:
+                    review_report.diagnostics = list(dict.fromkeys(git_result.diagnostics + review_report.diagnostics))
+
+            if args.output_format == "json":
+                print(json.dumps(dataclasses.asdict(review_report), indent=2))
+            else:
+                print(format_review_report(review_report))
+
+            if review_report.error:
                 sys.exit(1)
             return
 

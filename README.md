@@ -98,6 +98,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Impact analysis now also groups impacted tests into `test_clusters` such as `sibling`, `nearby`, and `integration`, with optional grouped test commands
 - Impact analysis now also surfaces shared boundary symbols, changed seed symbols, diff hunks, concrete file/line locations, and short boundary snippets so agents can jump straight to the likely change boundary
 - `suggested_checks` can now point directly at a boundary line/snippet instead of only naming a file
+- Review mode now combines branch context, changed-file diff anchors, public API / entrypoint / config surfaces, nearby tests, and impact-based `review_focus` priorities into a single "what to check first" view
 
 ## Supported languages
 
@@ -167,6 +168,9 @@ repomap --root /path/to/project --impact-from app.py service.py
 # Analyze likely impact radius around your current git changes
 repomap --root /path/to/project --impact-changed --base-ref origin/main
 
+# Review the current branch like a PR, with branch + diff + impact context
+repomap --root /path/to/project --review --base-ref origin/main
+
 # Render a compact "what to edit next" plan for an impact analysis
 repomap --root /path/to/project --impact-from app.py --edit-plan
 
@@ -202,6 +206,11 @@ When using `--impact-from` or `--impact-changed`, the CLI switches to impact-ana
 - or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `test_clusters` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, per-target `symbol_path`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
 
 If you pass `--edit-plan`, text output switches to a compact edit-oriented view that prioritizes the first few high-signal next steps, along with their best concrete edit candidates.
+
+When using `--review`, the CLI switches to review mode and returns either:
+
+- a readable PR-style summary with changed surfaces, diff anchors, grouped test clusters, closest impact targets, and a prioritized `review_focus` lane
+- or a structured payload containing `current_branch`, `base_ref`, `changed_files`, `changed_public_api_files`, `changed_entrypoint_files`, `changed_config_files`, `changed_test_files`, `review_focus`, plus the underlying impact-driven `quick_actions`, `edit_candidates`, `edit_plan`, `test_clusters`, `impacted_files`, and `shared_symbols`
 
 ### Repository config
 
@@ -270,6 +279,7 @@ For task-focused workflows, pass `query="auth login flow"` to bias ranking towar
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files. Its response now includes symbol-level evidence such as callsites, imports, TS/JS re-exports, and Python package-boundary hops.
 The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, symbol-level path evidence, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
+The server also exposes `review_changes` for PR/review-style workflows. It combines git-changed files, branch metadata, changed diff anchors, public API and entrypoint surfaces, grouped nearby tests, and a prioritized `review_focus` queue on top of the existing impact analysis payload.
 
 ### Evals
 
