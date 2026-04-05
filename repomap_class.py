@@ -165,6 +165,7 @@ class ImpactQuickAction:
     message: str
     effort: str = "small"
     risk_level: str = "low"
+    confidence: float = 0.5
     why_now: Optional[str] = None
     expected_outcome: Optional[str] = None
     follow_if_true: Optional[str] = None
@@ -1639,6 +1640,7 @@ class RepoMap:
                 target,
                 suggestion,
             )
+            confidence = self._score_quick_action_confidence(kind, target)
 
             quick_actions.append(
                 ImpactQuickAction(
@@ -1648,6 +1650,7 @@ class RepoMap:
                     message=message,
                     effort=effort,
                     risk_level=risk_level,
+                    confidence=confidence,
                     why_now=why_now,
                     expected_outcome=expected_outcome,
                     follow_if_true=follow_if_true,
@@ -1709,8 +1712,48 @@ class RepoMap:
                 priority=first.priority,
             )
 
-        quick_actions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
+        quick_actions.sort(key=lambda item: (item.priority, -item.confidence, len(item.path_from_seed), item.target))
         return quick_actions[:6]
+
+    def _score_quick_action_confidence(
+        self,
+        kind: str,
+        target: Optional[ImpactTarget],
+    ) -> float:
+        """Estimate how strong the repository evidence is for a quick action."""
+        base_scores = {
+            "open_changed_boundary": 0.9,
+            "run_nearby_test": 0.82,
+            "open_direct_neighbor": 0.72,
+            "check_config_assumption": 0.64,
+            "start_here": 0.52,
+        }
+        score = base_scores.get(kind, 0.6)
+
+        if not target:
+            return round(score, 2)
+
+        score -= max(target.distance - 1, 0) * 0.05
+
+        if target.closest_changed_hunk_distance is not None:
+            if target.closest_changed_hunk_distance == 0:
+                score += 0.05
+            elif target.closest_changed_hunk_distance == 1:
+                score += 0.03
+            elif target.closest_changed_hunk_distance >= 3:
+                score -= 0.04
+
+        if target.is_test_file and kind == "run_nearby_test":
+            score += 0.04
+        if target.summary_kind == "config" and kind == "check_config_assumption":
+            score += 0.04
+        if target.is_public_api_file and kind == "open_changed_boundary":
+            score += 0.03
+        if target.is_entrypoint_file and kind == "open_direct_neighbor":
+            score += 0.02
+
+        score = min(max(score, 0.15), 0.98)
+        return round(score, 2)
 
     def _describe_quick_action(
         self,
