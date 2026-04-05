@@ -16,6 +16,7 @@ from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
 from grep_ast import TreeContext
 from utils import count_tokens, read_text
 from scm import get_scm_fname
+from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
 
 # Pre-import tree-sitter modules to avoid per-file import overhead (R1 Finding #7)
@@ -227,6 +228,59 @@ class RepoMap:
             return nx.pagerank(graph, **pagerank_kwargs)
         except (ImportError, ModuleNotFoundError):
             return _pagerank_python(graph, **pagerank_kwargs)
+
+    def _score_file_tag(
+        self,
+        rel_fname: str,
+        tag_name: str,
+        file_rank: float,
+        mentioned_fnames: Set[str],
+        mentioned_idents: Set[str],
+        chat_rel_fnames: Set[str],
+    ) -> float:
+        """Apply the standard rank boosts for a file/tag pair."""
+        boost = 1.0
+        if tag_name in mentioned_idents:
+            boost *= 10.0
+        if rel_fname in mentioned_fnames:
+            boost *= 5.0
+        if rel_fname in chat_rel_fnames:
+            boost *= 20.0
+        return file_rank * boost
+
+    def _get_important_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
+        """Generate synthetic tags for important docs/configs that lack parser tags."""
+        text = self.read_text_func_internal(fname)
+        if not text:
+            return []
+
+        candidate_lines = []
+        fallback_lines = []
+        for line_num, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if len(fallback_lines) < 4:
+                fallback_lines.append(line_num)
+
+            if (
+                line_num == 1
+                or stripped.startswith(("#", "[", "{"))
+                or "=" in stripped
+                or ":" in stripped
+            ):
+                candidate_lines.append(line_num)
+
+            if len(candidate_lines) >= 6:
+                break
+
+        lois = candidate_lines or fallback_lines
+        basename = Path(rel_fname).name
+        return [
+            Tag(rel_fname=rel_fname, fname=fname, line=line_num, name=basename, kind="doc")
+            for line_num in lois
+        ]
     
     def get_tags_raw(self, fname: str, rel_fname: str) -> List[Tag]:
         """Parse file to extract tags using Tree-sitter."""
@@ -424,6 +478,7 @@ class RepoMap:
         excluded: Dict[str, str] = {}
         total_definitions = 0
         total_references = 0
+        supplemental_tags_by_file: Dict[str, List[Tag]] = {}
 
         defines = defaultdict(set)
         references = defaultdict(set)
@@ -460,6 +515,11 @@ class RepoMap:
                 elif tag.kind == "ref":
                     references[tag.name].add(rel_fname)
                     total_references += 1
+
+            if not tags and is_important(rel_fname):
+                synthetic_tags = self._get_important_file_tags(fname, rel_fname)
+                if synthetic_tags:
+                    supplemental_tags_by_file[fname] = synthetic_tags
             
             # Set personalization for chat files
             if fname in chat_fnames_set:
@@ -514,23 +574,32 @@ class RepoMap:
             file_rank = ranks.get(rel_fname, 0.0)
 
             # Exclude files with low Page Rank if exclude_unranked is True
-            if self.exclude_unranked and file_rank <= 0.0001:  # Use a small threshold to exclude near-zero ranks
+            if self.exclude_unranked and file_rank <= 0.0001 and fname not in supplemental_tags_by_file:
                 continue
             
             tags = self.get_tags(fname, rel_fname)
             for tag in tags:
                 if tag.kind == "def":
-                    # Boost for mentioned identifiers
-                    boost = 1.0
-                    if tag.name in mentioned_idents:
-                        boost *= 10.0
-                    if rel_fname in mentioned_fnames:
-                        boost *= 5.0
-                    if rel_fname in chat_rel_fnames:
-                        boost *= 20.0
-                    
-                    final_rank = file_rank * boost
+                    final_rank = self._score_file_tag(
+                        rel_fname,
+                        tag.name,
+                        file_rank,
+                        mentioned_fnames,
+                        mentioned_idents,
+                        chat_rel_fnames,
+                    )
                     ranked_tags.append((final_rank, tag))
+
+            for tag in supplemental_tags_by_file.get(fname, []):
+                final_rank = self._score_file_tag(
+                    rel_fname,
+                    tag.name,
+                    max(file_rank * 4.0, 0.02),
+                    mentioned_fnames,
+                    mentioned_idents,
+                    chat_rel_fnames,
+                )
+                ranked_tags.append((final_rank, tag))
         
         # Sort by rank (descending)
         ranked_tags.sort(key=lambda x: x[0], reverse=True)

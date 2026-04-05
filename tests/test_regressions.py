@@ -37,7 +37,7 @@ class RepoMapRankingTests(unittest.TestCase):
                 ],
             }
 
-            repo_map = RepoMap(root=str(root))
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
             repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
 
             ranked_tags, _ = repo_map.get_ranked_tags(
@@ -48,6 +48,38 @@ class RepoMapRankingTests(unittest.TestCase):
             ranks_by_file = {tag.rel_fname: rank for rank, tag in ranked_tags}
             self.assertGreater(ranks_by_file["c.py"], ranks_by_file["b.py"])
             self.assertGreater(ranks_by_file["b.py"], ranks_by_file["a.py"])
+
+    def test_important_files_without_parser_tags_still_appear_in_map(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            readme = root / "README.md"
+            source = root / "main.py"
+            readme.write_text("# Project Title\n\nSome high-level description.\n", encoding="utf-8")
+            source.write_text("def main():\n    return 1\n", encoding="utf-8")
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+
+            def fake_get_tags(fname, rel_fname):
+                if rel_fname == "main.py":
+                    return [Tag(rel_fname, fname, 1, "main", "def")]
+                return []
+
+            repo_map.get_tags = fake_get_tags
+
+            ranked_tags, file_report = repo_map.get_ranked_tags(
+                [],
+                [str(readme), str(source)],
+            )
+            map_content, _ = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(readme), str(source)],
+                max_map_tokens=4096,
+            )
+
+            self.assertTrue(any(tag.rel_fname == "README.md" and tag.kind == "doc" for _, tag in ranked_tags))
+            self.assertEqual(file_report.definition_matches, 1)
+            self.assertIn("README.md:", map_content)
+            self.assertIn("# Project Title", map_content)
 
 
 class SearchIdentifierCacheTests(unittest.TestCase):

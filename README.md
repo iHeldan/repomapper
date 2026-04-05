@@ -9,7 +9,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 1. **Parses** every source file with Tree-sitter to extract definitions and references
 2. **Builds a graph** where files are nodes and symbol references are edges
 3. **Ranks** files using PageRank — heavily referenced modules surface to the top
-4. **Compresses** the output to fit within a token budget (default 8192 tokens)
+4. **Keeps** important docs and config files visible even when they don't contain parser-extracted symbols
+5. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -58,6 +59,12 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Batch edge addition for graph building (R3)
 - Pre-computed relative paths to avoid redundant Path operations (R4)
 - Pre-sorted file grouping hoisted out of binary search loop (R3)
+
+### Better repository context
+
+- Important files like `README.md`, `pyproject.toml`, workflow YAMLs and docs can still appear in the map even when they have no tree-sitter symbol tags
+- Standalone `.tsx` files use the TSX parser/runtime instead of falling back to plain TypeScript parsing
+- Parser bootstrap failures are surfaced as user-facing diagnostics instead of silently collapsing into an empty map
 
 ## Supported languages
 
