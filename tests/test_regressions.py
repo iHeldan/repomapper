@@ -416,6 +416,56 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.steps[0].symbols, ["Service"])
             self.assertEqual(report.steps[1].relation, "related_test")
 
+    def test_analyze_file_impact_surfaces_neighbors_and_tests(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            db_file = root / "db.py"
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            test_file = test_dir / "test_service.py"
+            for path in (app_file, service_file, db_file, test_file):
+                path.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [
+                    Tag("app.py", str(app_file), 1, "run_app", "def"),
+                    Tag("app.py", str(app_file), 2, "Service", "ref"),
+                ],
+                "service.py": [
+                    Tag("service.py", str(service_file), 1, "Service", "def"),
+                    Tag("service.py", str(service_file), 2, "db_query", "ref"),
+                ],
+                "db.py": [
+                    Tag("db.py", str(db_file), 1, "db_query", "def"),
+                ],
+                "test_service.py": [],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(app_file)],
+                files=[str(app_file), str(service_file), str(db_file), str(test_file)],
+                max_depth=2,
+                max_results=5,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual(report.seed_files, ["app.py"])
+            by_path = {entry.path: entry for entry in report.impacted_files}
+            self.assertEqual(by_path["service.py"].distance, 1)
+            self.assertEqual(by_path["service.py"].path_from_seed, ["app.py", "service.py"])
+            self.assertEqual(by_path["service.py"].steps[0].relation, "references")
+            self.assertIn("impact_path", {reason.code for reason in by_path["service.py"].reasons})
+            self.assertIn("db.py", by_path)
+            self.assertEqual(by_path["db.py"].path_from_seed, ["app.py", "service.py", "db.py"])
+            self.assertIn("tests/test_service.py", by_path)
+            self.assertTrue(by_path["tests/test_service.py"].is_test_file)
+            self.assertIn("impact_test", {reason.code for reason in by_path["tests/test_service.py"].reasons})
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
@@ -754,6 +804,70 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["steps"][0]["relation"], "references")
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_cli_impact_mode_can_emit_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("value = 1\n", encoding="utf-8")
+            service_file.write_text("value = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+                captured["seed_files"] = seed_files
+                captured["files"] = files
+                captured["max_depth"] = max_depth
+                captured["max_results"] = max_results
+                return repomap_class.ImpactReport(
+                    seed_files=["app.py"],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    impacted_files=[
+                        repomap_class.ImpactTarget(
+                            path="service.py",
+                            seed_file="app.py",
+                            distance=1,
+                            path_from_seed=["app.py", "service.py"],
+                            steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
+                        )
+                    ],
+                    diagnostics=["Found 1 impacted file."],
+                )
+
+            with mock.patch.object(repomap.RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "repomap.py",
+                        "--root",
+                        str(root),
+                        "--impact-from",
+                        "app.py",
+                        "--impact-max-depth",
+                        "3",
+                        "--impact-max-results",
+                        "5",
+                        "--output-format",
+                        "json",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual([Path(path).name for path in captured["seed_files"]], ["app.py"])
+            self.assertEqual(captured["max_depth"], 3)
+            self.assertEqual(captured["max_results"], 5)
+            self.assertEqual(payload["seed_files"], ["app.py"])
+            self.assertEqual(payload["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
+            self.assertEqual(stderr.getvalue(), "")
+
 
 class RepoMapServerTests(unittest.TestCase):
     def tearDown(self):
@@ -852,6 +966,49 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["path"], ["app.py", "service.py"])
             self.assertEqual(result["steps"][0]["relation"], "references")
             self.assertEqual(result["diagnostics"], ["Found a 1-hop path."])
+
+    def test_analyze_file_impact_tool_returns_serialized_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("value = 1\n", encoding="utf-8")
+            service_file.write_text("value = 2\n", encoding="utf-8")
+
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+                return repomap_class.ImpactReport(
+                    seed_files=["app.py"],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    impacted_files=[
+                        repomap_class.ImpactTarget(
+                            path="service.py",
+                            seed_file="app.py",
+                            distance=1,
+                            path_from_seed=["app.py", "service.py"],
+                            steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
+                        )
+                    ],
+                    diagnostics=["Found 1 impacted file."],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(app_file), str(service_file)]):
+                    with mock.patch.object(RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
+                        result = asyncio.run(
+                            repomap_server.analyze_file_impact(
+                                str(root),
+                                ["app.py"],
+                                max_depth=3,
+                                max_results=5,
+                            )
+                        )
+
+            self.assertEqual(result["seed_files"], ["app.py"])
+            self.assertEqual(result["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
+            self.assertEqual(result["diagnostics"], ["Found 1 impacted file."])
 
 
 class GitSupportTests(unittest.TestCase):

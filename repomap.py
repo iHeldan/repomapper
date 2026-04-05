@@ -96,6 +96,45 @@ def format_connection_report(report) -> str:
     return "\n".join(lines)
 
 
+def format_impact_report(report) -> str:
+    """Render an impact analysis report as readable text."""
+    if report.error:
+        lines = [f"Impact analysis failed: {report.error}"]
+        if report.diagnostics:
+            lines.append("")
+            lines.append("Diagnostics:")
+            lines.extend(f"- {message}" for message in report.diagnostics)
+        return "\n".join(lines)
+
+    lines = [
+        f"Impact analysis from: {', '.join(report.seed_files)}",
+        f"Depth: <= {report.max_depth} hops",
+        f"Results: {len(report.impacted_files)}",
+    ]
+
+    for target in report.impacted_files:
+        lines.append("")
+        lines.append(f"{target.path} (distance {target.distance}, from {target.seed_file})")
+        lines.append(f"Path: {' -> '.join(target.path_from_seed)}")
+        if target.steps:
+            relation_chunks = []
+            for step in target.steps:
+                symbol_suffix = f"[{', '.join(step.symbols[:2])}]" if step.symbols else ""
+                relation_chunks.append(f"{step.relation}{symbol_suffix}")
+            lines.append(
+                "Relations: "
+                + " -> ".join(relation_chunks)
+            )
+        if target.reasons:
+            lines.append(f"Why: {target.reasons[0].message}")
+
+    if report.diagnostics:
+        lines.append("")
+        lines.append("Diagnostics:")
+        lines.extend(f"- {message}" for message in report.diagnostics)
+    return "\n".join(lines)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -173,6 +212,26 @@ Examples:
         type=int,
         default=6,
         help="Maximum allowed hop count when tracing file connections (default: 6)"
+    )
+
+    parser.add_argument(
+        "--impact-from",
+        nargs="+",
+        help="Analyze which nearby files are most likely affected by the given file(s)"
+    )
+
+    parser.add_argument(
+        "--impact-max-depth",
+        type=int,
+        default=2,
+        help="Maximum graph distance to consider for impact analysis (default: 2)"
+    )
+
+    parser.add_argument(
+        "--impact-max-results",
+        type=int,
+        default=10,
+        help="Maximum impacted files to return in impact mode (default: 10)"
     )
     
     parser.add_argument(
@@ -279,9 +338,13 @@ Examples:
     other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
     trace_from = str(resolve_repo_path(root_path, args.trace_from).resolve()) if args.trace_from else None
     trace_to = str(resolve_repo_path(root_path, args.trace_to).resolve()) if args.trace_to else None
+    impact_from = [str(resolve_repo_path(root_path, f).resolve()) for f in (args.impact_from or [])]
 
     if bool(trace_from) != bool(trace_to):
         tool_error("Both --trace-from and --trace-to must be provided together.")
+        sys.exit(1)
+    if trace_from and impact_from:
+        tool_error("Trace mode and impact mode cannot be used together.")
         sys.exit(1)
 
     changed_files = []
@@ -309,7 +372,9 @@ Examples:
                     f"Including repository neighbors up to distance {args.changed_neighbors} around changed files."
                 )
 
-    inferred_parser_languages = infer_parser_languages(chat_files + other_files + [path for path in (trace_from, trace_to) if path])
+    inferred_parser_languages = infer_parser_languages(
+        chat_files + other_files + impact_from + [path for path in (trace_from, trace_to) if path]
+    )
 
     if args.warm_languages:
         requested_languages = inferred_parser_languages if args.warm_languages == ["auto"] else args.warm_languages
@@ -358,6 +423,23 @@ Examples:
                 print(format_connection_report(connection_report))
 
             if connection_report.error:
+                sys.exit(1)
+            return
+
+        if impact_from:
+            impact_report = repo_map.analyze_file_impact(
+                impact_from,
+                files=other_files,
+                max_depth=args.impact_max_depth,
+                max_results=args.impact_max_results,
+            )
+
+            if args.output_format == "json":
+                print(json.dumps(dataclasses.asdict(impact_report), indent=2))
+            else:
+                print(format_impact_report(impact_report))
+
+            if impact_report.error:
                 sys.exit(1)
             return
 

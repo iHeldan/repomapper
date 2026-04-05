@@ -403,6 +403,79 @@ async def trace_file_path(
         log.exception(f"Error tracing file path in project '{project_root}': {e}")
         return {"error": f"Error tracing file path: {str(e)}"}
 
+
+@mcp.tool()
+async def analyze_file_impact(
+    project_root: str,
+    seed_files: List[str],
+    other_files: Optional[List[str]] = None,
+    max_depth: int = 2,
+    max_results: int = 10,
+    download_missing_parsers: bool = False,
+) -> Dict[str, Any]:
+    """Analyze likely impact neighbors around the given seed files.
+
+    :param project_root: Root directory of the project to search. (must be an absolute path!)
+    :param seed_files: Seed file paths relative to project_root, or absolute paths under it.
+    :param other_files: Optional file scope to limit the search. Defaults to all source files under project_root.
+    :param max_depth: Maximum graph distance to consider. Defaults to 2.
+    :param max_results: Maximum impacted files to return. Defaults to 10.
+    :param download_missing_parsers: If True, attempts to download required parser runtimes before building the graph.
+    :returns: A dictionary containing impacted files, paths, reason metadata, diagnostics, or an error.
+    """
+    if error := _check_project_root(project_root):
+        return error
+
+    root_path = Path(project_root).resolve()
+    root_str = str(root_path)
+
+    def _to_abs(f: str) -> str:
+        p = Path(f)
+        return str(p if p.is_absolute() else root_path / f)
+
+    def _run_impact():
+        effective_other_files = other_files if other_files is not None else find_src_files(project_root)
+        abs_other = [_to_abs(f) for f in effective_other_files if _validate_path_containment(f, root_str)]
+        abs_seed_files = [_to_abs(f) for f in seed_files]
+
+        invalid_seed_files = [
+            seed_file for seed_file, abs_seed in zip(seed_files, abs_seed_files)
+            if not _validate_path_containment(abs_seed, root_str)
+        ]
+        if invalid_seed_files:
+            return {
+                "error": (
+                    "Seed file(s) resolve outside the project root: "
+                    + ", ".join(invalid_seed_files)
+                )
+            }
+
+        if download_missing_parsers:
+            warm_languages(infer_parser_languages(abs_other + abs_seed_files))
+
+        repo_mapper = RepoMap(
+            root=str(root_path),
+            token_counter_func=lambda text: count_tokens(text, "gpt-4"),
+            file_reader_func=read_text,
+            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error},
+            verbose=False,
+            exclude_unranked=True
+        )
+
+        report = repo_mapper.analyze_file_impact(
+            abs_seed_files,
+            files=abs_other,
+            max_depth=max_depth,
+            max_results=max_results,
+        )
+        return dataclasses.asdict(report)
+
+    try:
+        return await asyncio.to_thread(_run_impact)
+    except Exception as e:
+        log.exception(f"Error analyzing file impact in project '{project_root}': {e}")
+        return {"error": f"Error analyzing file impact: {str(e)}"}
+
 # --- Main Entry Point ---
 def main():
     # Run the MCP server

@@ -115,6 +115,32 @@ class ConnectionReport:
     error: Optional[str] = None
 
 
+@dataclass
+class ImpactTarget:
+    path: str
+    seed_file: str
+    distance: int
+    path_from_seed: List[str] = field(default_factory=list)
+    steps: List[ConnectionStep] = field(default_factory=list)
+    is_test_file: bool = False
+    is_entrypoint_file: bool = False
+    is_public_api_file: bool = False
+    is_important_file: bool = False
+    summary_kind: Optional[str] = None
+    summary_items: List[str] = field(default_factory=list)
+    reasons: List[RankingReason] = field(default_factory=list)
+
+
+@dataclass
+class ImpactReport:
+    seed_files: List[str]
+    max_depth: int
+    max_results: int
+    impacted_files: List[ImpactTarget] = field(default_factory=list)
+    diagnostics: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
 
 # Constants
 CACHE_VERSION = 1
@@ -886,6 +912,27 @@ class RepoMap:
                 error=f"Shortest path is {hop_count} hops, which exceeds the max_hops limit of {max_hops}.",
             )
 
+        steps = self._build_connection_steps(path, graph, edge_symbols)
+
+        diagnostics = list(self.diagnostics)
+        if hop_count:
+            diagnostics.append(f"Found a {hop_count}-hop path between {start_rel} and {end_rel}.")
+
+        return ConnectionReport(
+            start_file=start_rel,
+            end_file=end_rel,
+            path=path,
+            steps=steps,
+            diagnostics=diagnostics,
+        )
+
+    def _build_connection_steps(
+        self,
+        path: List[str],
+        graph: nx.DiGraph,
+        edge_symbols: Dict[Tuple[str, str], List[str]],
+    ) -> List[ConnectionStep]:
+        """Convert a path into directional step metadata."""
         steps = []
         for source, target in zip(path, path[1:]):
             if graph.has_edge(source, target):
@@ -906,18 +953,214 @@ class RepoMap:
                 symbols = []
 
             steps.append(ConnectionStep(source=source, target=target, relation=relation, symbols=symbols[:5]))
+        return steps
+
+    def analyze_file_impact(
+        self,
+        seed_files: List[str],
+        files: Optional[List[str]] = None,
+        max_depth: int = 2,
+        max_results: int = 10,
+    ) -> ImpactReport:
+        """Find nearby repository files most likely to be affected by the given seed files."""
+        self.diagnostics = []
+        self._tag_failures = {}
+        self._uncacheable_tag_failures = set()
+
+        seed_files = list(dict.fromkeys(seed_files or []))
+        resolved_seed_files = [self.get_rel_fname(os.path.abspath(seed_file)) for seed_file in seed_files]
+        report = ImpactReport(
+            seed_files=resolved_seed_files,
+            max_depth=max_depth,
+            max_results=max_results,
+        )
+
+        if not seed_files:
+            report.error = "At least one seed file is required for impact analysis."
+            return report
+        if max_depth < 1:
+            report.error = "max_depth must be at least 1."
+            return report
+        if max_results < 1:
+            report.error = "max_results must be at least 1."
+            return report
+
+        candidate_files = files or find_src_files(str(self.root))
+        all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in candidate_files))
+        abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
+        rel_to_abs = {rel_fname: fname for fname, rel_fname in abs_to_rel.items()}
+
+        seed_abs_files = [os.path.abspath(seed_file) for seed_file in seed_files]
+        missing_seed_files = [
+            abs_to_rel.get(seed_abs, self.get_rel_fname(seed_abs))
+            for seed_abs in seed_abs_files
+            if seed_abs not in abs_to_rel
+        ]
+        if missing_seed_files:
+            report.error = (
+                "Seed file(s) are not in the selected repository scope: "
+                + ", ".join(missing_seed_files)
+            )
+            report.diagnostics = list(self.diagnostics)
+            return report
+
+        _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        undirected_graph = graph.to_undirected()
+
+        seed_rel_files = [abs_to_rel[seed_abs] for seed_abs in seed_abs_files]
+        missing_graph_files = [
+            rel_fname for rel_fname in seed_rel_files
+            if rel_fname not in undirected_graph
+        ]
+        if missing_graph_files:
+            report.error = (
+                "Seed file(s) could not be added to the repository graph: "
+                + ", ".join(missing_graph_files)
+            )
+            report.diagnostics = list(self.diagnostics)
+            return report
+
+        candidate_targets = {}
+        seed_rel_set = set(seed_rel_files)
+        for seed_rel in seed_rel_files:
+            try:
+                seed_paths = nx.single_source_shortest_path(
+                    undirected_graph,
+                    seed_rel,
+                    cutoff=max_depth,
+                )
+            except nx.NodeNotFound:
+                continue
+
+            for target_rel, path in seed_paths.items():
+                if target_rel in seed_rel_set or len(path) < 2:
+                    continue
+                distance = len(path) - 1
+                current = candidate_targets.get(target_rel)
+                candidate = (distance, seed_rel, path)
+                if current is None or candidate < current:
+                    candidate_targets[target_rel] = candidate
+
+        impacted_files = []
+        for target_rel, (distance, seed_rel, path) in candidate_targets.items():
+            target_abs = rel_to_abs.get(target_rel)
+            if not target_abs:
+                continue
+
+            steps = self._build_connection_steps(path, graph, edge_symbols)
+            is_test_file = self._is_test_file(target_rel)
+            entrypoint_signals, public_api_signals = self._get_path_role_signals(target_rel)
+            is_entrypoint_file = bool(entrypoint_signals)
+            is_public_api_file = bool(public_api_signals)
+            is_important_file = is_important(target_rel)
+            summary_kind, summary_items = self._extract_file_summary(target_abs, target_rel)
+
+            relations_preview = " -> ".join(step.relation for step in steps[:4])
+            reasons = [
+                RankingReason(
+                    "impact_path",
+                    f"Reachable from {seed_rel} in {distance} hop(s).",
+                ),
+            ]
+            if relations_preview:
+                reasons.append(
+                    RankingReason(
+                        "impact_relations",
+                        f"Path relations: {relations_preview}.",
+                    )
+                )
+            symbol_preview = [
+                symbol
+                for step in steps
+                for symbol in step.symbols[:2]
+            ]
+            if symbol_preview:
+                reasons.append(
+                    RankingReason(
+                        "impact_symbols",
+                        f"Connected via symbols such as: {', '.join(symbol_preview[:4])}.",
+                    )
+                )
+            if is_test_file:
+                reasons.append(
+                    RankingReason(
+                        "impact_test",
+                        f"Looks like nearby validation coverage for {seed_rel}.",
+                    )
+                )
+            if is_entrypoint_file:
+                reasons.append(
+                    RankingReason(
+                        "impact_entrypoint",
+                        f"Looks like an application entrypoint via: {', '.join(entrypoint_signals[:3])}.",
+                    )
+                )
+            if is_public_api_file:
+                reasons.append(
+                    RankingReason(
+                        "impact_public_api",
+                        f"Looks like a public API surface via: {', '.join(public_api_signals[:3])}.",
+                    )
+                )
+            if is_important_file:
+                reasons.append(
+                    RankingReason(
+                        "impact_important_file",
+                        "Looks like an important project file.",
+                    )
+                )
+            if summary_items:
+                summary_code = "impact_doc_summary" if summary_kind == "doc" else "impact_config_summary"
+                reasons.append(
+                    RankingReason(
+                        summary_code,
+                        f"Structured summary extracted: {', '.join(summary_items[:2])}.",
+                    )
+                )
+
+            impacted_files.append(
+                ImpactTarget(
+                    path=target_rel,
+                    seed_file=seed_rel,
+                    distance=distance,
+                    path_from_seed=path,
+                    steps=steps,
+                    is_test_file=is_test_file,
+                    is_entrypoint_file=is_entrypoint_file,
+                    is_public_api_file=is_public_api_file,
+                    is_important_file=is_important_file,
+                    summary_kind=summary_kind,
+                    summary_items=summary_items[:5],
+                    reasons=reasons,
+                )
+            )
+
+        impacted_files.sort(
+            key=lambda item: (
+                item.distance,
+                -(
+                    (3 if item.is_test_file else 0)
+                    + (2 if item.is_public_api_file else 0)
+                    + (2 if item.is_entrypoint_file else 0)
+                    + (1 if item.is_important_file else 0)
+                    + (1 if item.summary_items else 0)
+                ),
+                item.path,
+            )
+        )
+        report.impacted_files = impacted_files[:max_results]
 
         diagnostics = list(self.diagnostics)
-        if hop_count:
-            diagnostics.append(f"Found a {hop_count}-hop path between {start_rel} and {end_rel}.")
-
-        return ConnectionReport(
-            start_file=start_rel,
-            end_file=end_rel,
-            path=path,
-            steps=steps,
-            diagnostics=diagnostics,
-        )
+        if report.impacted_files:
+            diagnostics.append(
+                f"Found {len(report.impacted_files)} impacted file(s) within {max_depth} hop(s) of {', '.join(seed_rel_files)}."
+            )
+        else:
+            diagnostics.append(
+                f"No impacted files were found within {max_depth} hop(s) of {', '.join(seed_rel_files)}."
+            )
+        report.diagnostics = diagnostics
+        return report
 
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""

@@ -16,7 +16,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 8. **Expands** git-changed views with nearby impact neighbors when needed
 9. **Extracts** lightweight summaries from key docs and config files
 10. **Traces** shortest file-level connection paths across the repository graph
-11. **Compresses** the output to fit within a token budget (default 8192 tokens)
+11. **Analyzes** likely impact radius around one or more seed files, including nearby tests and boundary files
+12. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -78,6 +79,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
+- Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 
 ## Supported languages
 
@@ -140,6 +142,9 @@ repomap --root /path/to/project --query "auth login flow"
 # Trace a file-level path between two parts of the repo
 repomap --root /path/to/project --trace-from app.py --trace-to api/routes.py
 
+# Analyze likely impact neighbors around one or more seed files
+repomap --root /path/to/project --impact-from app.py service.py
+
 # Download missing parser runtimes before mapping
 repomap --root /path/to/project --download-missing-parsers
 
@@ -165,6 +170,11 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 
 - a readable hop-by-hop explanation in text mode
 - or a structured `path` + `steps` payload in JSON mode
+
+When using `--impact-from`, the CLI switches to impact-analysis mode and returns either:
+
+- a readable list of nearby impacted files with shortest paths and relations in text mode
+- or a structured `seed_files` + `impacted_files` payload in JSON mode
 
 ### MCP Server
 
@@ -192,6 +202,7 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files.
 
 ## Dependencies
 
