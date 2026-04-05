@@ -166,6 +166,7 @@ class ImpactQuickAction:
     effort: str = "small"
     risk_level: str = "low"
     confidence: float = 0.5
+    focus_symbols: List[str] = field(default_factory=list)
     why_now: Optional[str] = None
     expected_outcome: Optional[str] = None
     follow_if_true: Optional[str] = None
@@ -1641,6 +1642,7 @@ class RepoMap:
                 suggestion,
             )
             confidence = self._score_quick_action_confidence(kind, target)
+            focus_symbols = self._select_quick_action_symbols(kind, target, suggestion)
 
             quick_actions.append(
                 ImpactQuickAction(
@@ -1651,6 +1653,7 @@ class RepoMap:
                     effort=effort,
                     risk_level=risk_level,
                     confidence=confidence,
+                    focus_symbols=focus_symbols,
                     why_now=why_now,
                     expected_outcome=expected_outcome,
                     follow_if_true=follow_if_true,
@@ -1754,6 +1757,41 @@ class RepoMap:
 
         score = min(max(score, 0.15), 0.98)
         return round(score, 2)
+
+    def _select_quick_action_symbols(
+        self,
+        kind: str,
+        target: Optional[ImpactTarget],
+        suggestion: ImpactSuggestion,
+    ) -> List[str]:
+        """Pick the most useful symbols to focus on for a quick action."""
+        candidates = []
+
+        if suggestion.anchor_symbol and suggestion.anchor_kind != "file":
+            candidates.append(suggestion.anchor_symbol)
+
+        if target:
+            if kind in {"open_changed_boundary", "run_nearby_test"}:
+                candidates.extend(target.changed_boundary_symbols)
+            if not candidates:
+                if kind == "open_changed_boundary":
+                    candidates.extend(target.boundary_symbols[:1])
+                elif kind == "run_nearby_test":
+                    candidates.extend(target.boundary_symbols[:1])
+                else:
+                    candidates.extend(target.boundary_symbols)
+
+        seen = set()
+        focus_symbols = []
+        for symbol in candidates:
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            focus_symbols.append(symbol)
+            if len(focus_symbols) >= 3:
+                break
+
+        return focus_symbols
 
     def _describe_quick_action(
         self,

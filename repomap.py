@@ -172,6 +172,8 @@ def format_impact_report(report) -> str:
         lines.append("Quick actions:")
         for action in report.quick_actions:
             lines.append(f"- [P{action.priority}] ({action.effort}, risk {action.risk_level}, confidence {action.confidence:.2f}) {action.kind} {action.target}: {action.message}")
+            if action.focus_symbols:
+                lines.append(f"  focus: {', '.join(action.focus_symbols[:3])}")
             if action.why_now:
                 lines.append(f"  why now: {action.why_now}")
             if action.expected_outcome:

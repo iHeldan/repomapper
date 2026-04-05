@@ -520,6 +520,7 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(first_action.effort, "small")
             self.assertEqual(first_action.risk_level, "low")
             self.assertEqual(first_action.confidence, 0.81)
+            self.assertEqual(first_action.focus_symbols, ["Service"])
             self.assertEqual(first_action.why_now, "This is the fastest validation signal close to app.py.")
             self.assertEqual(
                 first_action.expected_outcome,
@@ -595,6 +596,7 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.quick_actions[0].anchor_symbol, "Service")
             self.assertEqual(report.quick_actions[0].risk_level, "low")
             self.assertEqual(report.quick_actions[0].confidence, 0.95)
+            self.assertEqual(report.quick_actions[0].focus_symbols, ["Service"])
             self.assertEqual(report.quick_actions[0].why_now, "This boundary is only 0 line(s) from the changed hunk.")
             self.assertEqual(
                 report.quick_actions[0].expected_outcome,
@@ -1065,6 +1067,7 @@ class CliPathResolutionTests(unittest.TestCase):
                             message="Open this changed boundary first and verify the nearby symbol contract.",
                             risk_level="low",
                             confidence=0.95,
+                            focus_symbols=["Service"],
                             why_now="This boundary is only 0 line(s) from the changed hunk.",
                             expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
                             follow_if_true="If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
@@ -1144,6 +1147,7 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["quick_actions"][0]["kind"], "open_changed_boundary")
             self.assertEqual(payload["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(payload["quick_actions"][0]["confidence"], 0.95)
+            self.assertEqual(payload["quick_actions"][0]["focus_symbols"], ["Service"])
             self.assertEqual(payload["quick_actions"][0]["why_now"], "This boundary is only 0 line(s) from the changed hunk.")
             self.assertEqual(
                 payload["quick_actions"][0]["expected_outcome"],
@@ -1385,6 +1389,7 @@ class RepoMapServerTests(unittest.TestCase):
                             message="Run or inspect this nearby test before making broader edits.",
                             risk_level="low",
                             confidence=0.86,
+                            focus_symbols=["Service"],
                             why_now="This is the fastest validation signal close to app.py.",
                             expected_outcome="Confirm whether the nearby test already passes or pinpoints the broken behavior.",
                             follow_if_true="If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
@@ -1448,6 +1453,7 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["quick_actions"][0]["kind"], "run_nearby_test")
             self.assertEqual(result["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(result["quick_actions"][0]["confidence"], 0.86)
+            self.assertEqual(result["quick_actions"][0]["focus_symbols"], ["Service"])
             self.assertEqual(result["quick_actions"][0]["why_now"], "This is the fastest validation signal close to app.py.")
             self.assertEqual(
                 result["quick_actions"][0]["expected_outcome"],
