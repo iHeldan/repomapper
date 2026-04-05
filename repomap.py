@@ -172,6 +172,11 @@ def format_impact_report(report) -> str:
         lines.append("Suggested checks:")
         for suggestion in report.suggested_checks:
             lines.append(f"- [P{suggestion.priority}] {suggestion.kind} {suggestion.target}: {suggestion.message}")
+            if suggestion.anchor_file and suggestion.anchor_line:
+                anchor_suffix = f" ({suggestion.anchor_kind} {suggestion.anchor_symbol})" if suggestion.anchor_symbol else ""
+                lines.append(f"  at {suggestion.anchor_file}:{suggestion.anchor_line}{anchor_suffix}")
+            if suggestion.anchor_excerpt:
+                lines.extend(f"    {line}" for line in suggestion.anchor_excerpt.splitlines()[:3])
 
     if report.shared_symbols:
         lines.append("")

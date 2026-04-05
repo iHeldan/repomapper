@@ -82,6 +82,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first
 - Impact analysis now also surfaces shared boundary symbols, changed seed symbols, diff hunks, concrete file/line locations, and short boundary snippets so agents can jump straight to the likely change boundary
+- `suggested_checks` can now point directly at a boundary line/snippet instead of only naming a file
 
 ## Supported languages
 
@@ -179,7 +180,7 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
-- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, and target `focus_lines`
+- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-suggestion anchor fields
 
 ### MCP Server
 

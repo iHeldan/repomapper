@@ -149,6 +149,11 @@ class ImpactSuggestion:
     message: str
     seed_file: Optional[str] = None
     path_from_seed: List[str] = field(default_factory=list)
+    anchor_file: Optional[str] = None
+    anchor_line: Optional[int] = None
+    anchor_symbol: Optional[str] = None
+    anchor_kind: Optional[str] = None
+    anchor_excerpt: Optional[str] = None
 
 
 @dataclass
@@ -1579,6 +1584,60 @@ class RepoMap:
         suggestions = []
         seen = set()
 
+        def choose_anchor(
+            target: ImpactTarget,
+            *,
+            prefer_changed: bool = False,
+            prefer_target_file: bool = True,
+        ) -> Optional[ImpactSnippet]:
+            snippets = target.boundary_snippets or []
+            if not snippets:
+                return None
+            if prefer_target_file and not any(snippet.file == target.path for snippet in snippets):
+                return None
+
+            scored = []
+            for index, snippet in enumerate(snippets):
+                score = 0
+                if prefer_changed and snippet.symbol in target.changed_boundary_symbols:
+                    score += 4
+                if prefer_target_file and snippet.file == target.path:
+                    score += 2
+                if snippet.highlight_line in target.focus_lines:
+                    score += 1
+                scored.append((-score, index, snippet))
+
+            scored.sort(key=lambda item: (item[0], item[1]))
+            return scored[0][2] if scored else snippets[0]
+
+        def build_target_file_anchor(target: ImpactTarget) -> Optional[ImpactSnippet]:
+            abs_fname = self.root / target.path
+            text = self.read_text_func_internal(str(abs_fname))
+            if not text:
+                return None
+
+            lines = text.splitlines()
+            if not lines:
+                return None
+
+            highlight_line = target.focus_lines[0] if target.focus_lines else 1
+            highlight_index = min(max(highlight_line - 1, 0), len(lines) - 1)
+            start_index = max(0, highlight_index - 1)
+            end_index = min(len(lines), highlight_index + 2)
+            excerpt = "\n".join(
+                f"{line_no}: {lines[line_no - 1]}"
+                for line_no in range(start_index + 1, end_index + 1)
+            )
+            return ImpactSnippet(
+                file=target.path,
+                start_line=start_index + 1,
+                end_line=end_index,
+                highlight_line=highlight_index + 1,
+                kind="file",
+                symbol=Path(target.path).name,
+                excerpt=excerpt,
+            )
+
         def add_suggestion(
             priority: int,
             kind: str,
@@ -1586,6 +1645,7 @@ class RepoMap:
             message: str,
             seed_file: Optional[str] = None,
             path_from_seed: Optional[List[str]] = None,
+            anchor: Optional[ImpactSnippet] = None,
         ) -> None:
             key = (kind, target)
             if key in seen:
@@ -1599,6 +1659,11 @@ class RepoMap:
                     message=message,
                     seed_file=seed_file,
                     path_from_seed=(path_from_seed or [])[:],
+                    anchor_file=anchor.file if anchor else None,
+                    anchor_line=anchor.highlight_line if anchor else None,
+                    anchor_symbol=anchor.symbol if anchor else None,
+                    anchor_kind=anchor.kind if anchor else None,
+                    anchor_excerpt=anchor.excerpt if anchor else None,
                 )
             )
 
@@ -1611,6 +1676,7 @@ class RepoMap:
                     f"Review or run this nearby test for changes around {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target) or build_target_file_anchor(target),
                 )
             if target.is_public_api_file:
                 add_suggestion(
@@ -1620,6 +1686,7 @@ class RepoMap:
                     f"Check whether the public API contract exposed by {target.path} changed.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target),
                 )
             if target.is_entrypoint_file:
                 add_suggestion(
@@ -1629,6 +1696,7 @@ class RepoMap:
                     f"Verify the main execution flow still reaches {target.path} correctly.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target),
                 )
             if target.summary_kind == "config":
                 add_suggestion(
@@ -1638,6 +1706,7 @@ class RepoMap:
                     f"Inspect this config file because it sits on the impact path from {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target),
                 )
             elif target.summary_kind == "doc":
                 add_suggestion(
@@ -1647,6 +1716,7 @@ class RepoMap:
                     f"Check this documentation file for setup or workflow assumptions around {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target, prefer_target_file=False),
                 )
             if target.distance == 1 and not target.is_test_file:
                 add_suggestion(
@@ -1656,6 +1726,7 @@ class RepoMap:
                     f"Inspect this direct neighbor because it is one hop away from {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target),
                 )
             if target.steps and any(step.symbols for step in target.steps):
                 if target.boundary_symbols:
@@ -1666,6 +1737,7 @@ class RepoMap:
                         f"Trace shared symbols such as {', '.join(target.boundary_symbols[:3])}.",
                         seed_file=target.seed_file,
                         path_from_seed=target.path_from_seed,
+                        anchor=choose_anchor(target),
                     )
             if target.changed_boundary_symbols:
                 add_suggestion(
@@ -1682,6 +1754,7 @@ class RepoMap:
                     ),
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
+                    anchor=choose_anchor(target, prefer_changed=True),
                 )
 
         if not suggestions and impacted_files:
@@ -1693,6 +1766,7 @@ class RepoMap:
                 f"Start with the closest impacted file on the path from {first_target.seed_file}.",
                 seed_file=first_target.seed_file,
                 path_from_seed=first_target.path_from_seed,
+                anchor=choose_anchor(first_target),
             )
 
         suggestions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))

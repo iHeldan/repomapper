@@ -488,6 +488,10 @@ class RepoMapRankingTests(unittest.TestCase):
             suggestion_kinds = {suggestion.kind for suggestion in report.suggested_checks}
             self.assertIn("review_test", suggestion_kinds)
             self.assertIn("inspect_neighbor", suggestion_kinds)
+            first_suggestion = report.suggested_checks[0]
+            self.assertEqual(first_suggestion.anchor_file, "tests/test_service.py")
+            self.assertEqual(first_suggestion.anchor_line, 1)
+            self.assertIn("test_service", first_suggestion.anchor_excerpt)
 
     def test_analyze_file_impact_uses_changed_seed_symbols_when_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -539,6 +543,9 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertTrue(report.shared_symbols[0].is_changed_seed_symbol)
             self.assertEqual(report.shared_symbols[0].closest_changed_hunk_distance, 0)
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
+            self.assertEqual(report.suggested_checks[0].anchor_file, "service.py")
+            self.assertEqual(report.suggested_checks[0].anchor_line, 1)
+            self.assertEqual(report.suggested_checks[0].anchor_symbol, "Service")
 
     def test_analyze_file_impact_prefers_targets_closer_to_changed_hunks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -990,6 +997,11 @@ class CliPathResolutionTests(unittest.TestCase):
                             message="Check whether the public API contract changed.",
                             seed_file="app.py",
                             path_from_seed=["app.py", "service.py"],
+                            anchor_file="service.py",
+                            anchor_line=1,
+                            anchor_symbol="Service",
+                            anchor_kind="def",
+                            anchor_excerpt="1: class Service:\n2:     pass",
                         )
                     ],
                     diagnostics=["Found 1 impacted file."],
@@ -1039,6 +1051,9 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
+            self.assertEqual(payload["suggested_checks"][0]["anchor_file"], "service.py")
+            self.assertEqual(payload["suggested_checks"][0]["anchor_line"], 1)
+            self.assertIn("class Service", payload["suggested_checks"][0]["anchor_excerpt"])
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(stderr.getvalue(), "")
 
@@ -1258,6 +1273,11 @@ class RepoMapServerTests(unittest.TestCase):
                             message="Review or run this nearby test.",
                             seed_file="app.py",
                             path_from_seed=["app.py", "tests/test_app.py"],
+                            anchor_file="service.py",
+                            anchor_line=1,
+                            anchor_symbol="Service",
+                            anchor_kind="def",
+                            anchor_excerpt="1: class Service:\n2:     pass",
                         )
                     ],
                     diagnostics=["Found 1 impacted file."],
@@ -1291,6 +1311,9 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
+            self.assertEqual(result["suggested_checks"][0]["anchor_file"], "service.py")
+            self.assertEqual(result["suggested_checks"][0]["anchor_line"], 1)
+            self.assertIn("class Service", result["suggested_checks"][0]["anchor_excerpt"])
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(result["diagnostics"], ["Found 1 impacted file."])
 
