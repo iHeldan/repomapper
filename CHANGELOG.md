@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1 - 2026-04-06
+
+### Changed
+
+- Repo map output is now deterministic for equal-rank ties, which keeps repeated runs and eval comparisons stable
+- Map selection now uses a lazy oversize-file fallback: it first searches the full ranked prefix, then filters individually oversized files only when needed
+- Regression coverage now explicitly guards deterministic ordering and lazy-filtering behavior
+
 ## 0.2.0 - 2026-04-06
 
 ### Added
@@ -19,4 +27,3 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - RepoMap report and review payload models now live in a dedicated `repomap_models.py` module to keep the core engine easier to evolve
-
