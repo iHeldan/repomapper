@@ -95,6 +95,75 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("README.md:", map_content)
             self.assertIn("# Project Title", map_content)
 
+    def test_markdown_summary_is_exposed_in_report_and_map(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            readme = root / "README.md"
+            source = root / "main.py"
+            readme.write_text(
+                "# RepoMapper\n\n"
+                "A compact repository map for AI agents.\n\n"
+                "## Installation\n\n"
+                "Run pip install -e .\n\n"
+                "## Usage\n\n"
+                "Use repomap --root .\n",
+                encoding="utf-8",
+            )
+            source.write_text("def main():\n    return 1\n", encoding="utf-8")
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: [Tag(rel_fname, fname, 1, "main", "def")] if rel_fname == "main.py" else []
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(readme), str(source)],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertEqual(by_path["README.md"].summary_kind, "doc")
+            self.assertIn("heading: RepoMapper", by_path["README.md"].summary_items)
+            self.assertIn("overview: A compact repository map for AI agents.", by_path["README.md"].summary_items)
+            self.assertIn("doc_summary", {reason.code for reason in by_path["README.md"].reasons})
+            self.assertIn("(Doc Highlights)", map_content)
+            self.assertIn("- heading: RepoMapper", map_content)
+
+    def test_package_json_summary_is_exposed_in_report_and_map(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            package_json = root / "package.json"
+            source = root / "app.ts"
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "name": "demo-app",
+                        "version": "1.2.3",
+                        "scripts": {"dev": "vite", "test": "vitest", "build": "vite build"},
+                        "dependencies": {"react": "^18.0.0", "vite": "^5.0.0"},
+                        "devDependencies": {"vitest": "^1.0.0"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source.write_text("export function app() { return true }\n", encoding="utf-8")
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: [Tag(rel_fname, fname, 1, "app", "def")] if rel_fname == "app.ts" else []
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(package_json), str(source)],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertEqual(by_path["package.json"].summary_kind, "config")
+            self.assertIn("package: demo-app@1.2.3", by_path["package.json"].summary_items)
+            self.assertIn("scripts: dev, test, build", by_path["package.json"].summary_items)
+            self.assertIn("config_summary", {reason.code for reason in by_path["package.json"].reasons})
+            self.assertIn("(Config Highlights)", map_content)
+            self.assertIn("- package: demo-app@1.2.3", map_content)
+
     def test_file_report_includes_ranked_files_reasons_and_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()

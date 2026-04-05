@@ -14,7 +14,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 6. **Surfaces** nearby related tests for highly relevant source files
 7. **Elevates** entrypoints and public API surfaces so agents can find where execution starts
 8. **Expands** git-changed views with nearby impact neighbors when needed
-9. **Compresses** the output to fit within a token budget (default 8192 tokens)
+9. **Extracts** lightweight summaries from key docs and config files
+10. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -74,6 +75,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Nearby test files can be lifted into the map even when they lack parser definitions, with `related_tests` / `related_source` reasons in the report
 - Entrypoints and public API files get automatic heuristic boosts and synthetic highlights, with `entrypoint_file` / `public_api_file` reasons in the report
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
+- Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 
 ## Supported languages
 
@@ -150,6 +152,7 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 - `changed_files` / `changed_neighbor_depth`: the changed-file focus set and the neighbor expansion depth used for impact views
 - `related_tests` / `related_sources`: heuristic source-to-test relationships to help agents find validating coverage quickly
 - `entrypoint_signals` / `public_api_signals`: heuristics explaining why a file looks like an app entrypoint or public API surface
+- `summary_kind` / `summary_items`: lightweight structured highlights extracted from important docs and config files
 - `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
 - `map_tokens`: estimated token cost of the rendered map
 

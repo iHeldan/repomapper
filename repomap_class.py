@@ -2,6 +2,7 @@
 RepoMap class for generating repository maps.
 """
 
+import json
 import os
 import re
 from pathlib import Path
@@ -18,6 +19,11 @@ from utils import count_tokens, read_text
 from scm import get_scm_fname
 from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 
 # Pre-import tree-sitter modules to avoid per-file import overhead (R1 Finding #7)
 try:
@@ -65,6 +71,8 @@ class RankedFile:
     related_sources: List[str] = field(default_factory=list)
     entrypoint_signals: List[str] = field(default_factory=list)
     public_api_signals: List[str] = field(default_factory=list)
+    summary_kind: Optional[str] = None
+    summary_items: List[str] = field(default_factory=list)
     mentioned_identifiers: List[str] = field(default_factory=list)
     sample_symbols: List[str] = field(default_factory=list)
     inbound_neighbors: List[str] = field(default_factory=list)
@@ -167,6 +175,8 @@ class RepoMap:
         self._tag_failures = {}
         self._uncacheable_tag_failures = set()
         self.diagnostics = []
+        self.file_summary_by_file = {}
+        self.file_summary_kind_by_file = {}
 
         # Load persistent tags cache
         self.load_tags_cache()
@@ -506,6 +516,236 @@ class RepoMap:
             return 0.03, 2.5
         return 0.015, max(1.25, 2.25 - (0.25 * changed_distance))
 
+    @staticmethod
+    def _shorten_summary_value(value: str, limit: int = 80) -> str:
+        """Normalize and trim summary text for compact map output."""
+        compact = " ".join(value.strip().split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3].rstrip() + "..."
+
+    def _extract_dependency_names(self, values: List[str]) -> List[str]:
+        """Extract package names from dependency specifications."""
+        names = []
+        for value in values:
+            item = value.strip()
+            if not item:
+                continue
+            if ";" in item:
+                item = item.split(";", 1)[0].strip()
+            if "[" in item:
+                item = item.split("[", 1)[0].strip()
+            match = re.match(r"([A-Za-z0-9_.-]+)", item)
+            if match:
+                names.append(match.group(1))
+        return self._dedupe_preserve_order(names)
+
+    def _extract_markdown_summary(self, text: str) -> List[str]:
+        """Summarize Markdown/docs files using headings and the opening paragraph."""
+        headings = []
+        first_paragraph_lines = []
+        in_paragraph = False
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if in_paragraph and first_paragraph_lines:
+                    break
+                continue
+
+            if line.startswith("#"):
+                heading = line.lstrip("#").strip()
+                if heading:
+                    headings.append(self._shorten_summary_value(heading, 60))
+                continue
+
+            if not in_paragraph:
+                in_paragraph = True
+            if len(first_paragraph_lines) < 2:
+                first_paragraph_lines.append(line)
+
+        items = [f"heading: {heading}" for heading in headings[:4]]
+        if first_paragraph_lines:
+            items.append(f"overview: {self._shorten_summary_value(' '.join(first_paragraph_lines), 90)}")
+        return items[:5]
+
+    def _extract_package_json_summary(self, text: str) -> List[str]:
+        """Summarize package.json metadata that helps agents orient quickly."""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+
+        items = []
+        name = data.get("name")
+        version = data.get("version")
+        if name:
+            items.append(f"package: {name}{'@' + version if version else ''}")
+
+        scripts = list((data.get("scripts") or {}).keys())
+        if scripts:
+            items.append(f"scripts: {', '.join(scripts[:4])}")
+
+        dependencies = list((data.get("dependencies") or {}).keys())
+        if dependencies:
+            items.append(f"dependencies: {', '.join(dependencies[:4])}")
+
+        dev_dependencies = list((data.get("devDependencies") or {}).keys())
+        if dev_dependencies:
+            items.append(f"devDependencies: {', '.join(dev_dependencies[:4])}")
+
+        return items[:5]
+
+    def _extract_pyproject_summary(self, text: str) -> List[str]:
+        """Summarize pyproject metadata for Python repos."""
+        if tomllib is None:
+            return []
+
+        try:
+            data = tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, TypeError):
+            return []
+
+        items = []
+        project = data.get("project") or {}
+        project_name = project.get("name")
+        project_version = project.get("version")
+        if project_name:
+            items.append(f"project: {project_name}{'@' + project_version if project_version else ''}")
+
+        dependencies = self._extract_dependency_names(project.get("dependencies") or [])
+        if dependencies:
+            items.append(f"dependencies: {', '.join(dependencies[:4])}")
+
+        scripts = list((project.get("scripts") or {}).keys())
+        if scripts:
+            items.append(f"scripts: {', '.join(scripts[:4])}")
+
+        build_backend = ((data.get("build-system") or {}).get("build-backend"))
+        if build_backend:
+            items.append(f"build backend: {build_backend}")
+
+        tool_sections = list((data.get("tool") or {}).keys())
+        if tool_sections:
+            items.append(f"tooling: {', '.join(tool_sections[:4])}")
+
+        return items[:5]
+
+    def _extract_workflow_summary(self, text: str) -> List[str]:
+        """Summarize GitHub Actions workflow metadata with lightweight parsing."""
+        items = []
+        lines = text.splitlines()
+
+        workflow_name = None
+        triggers = []
+        jobs = []
+        in_on_block = False
+        in_jobs_block = False
+
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            if raw_line.startswith("name:") and workflow_name is None:
+                workflow_name = raw_line.split(":", 1)[1].strip().strip("'\"")
+                continue
+
+            if stripped.startswith("on:"):
+                in_on_block = True
+                in_jobs_block = False
+                inline = stripped.split(":", 1)[1].strip()
+                if inline:
+                    triggers.extend(re.findall(r"[A-Za-z_]+", inline))
+                continue
+
+            if stripped.startswith("jobs:"):
+                in_jobs_block = True
+                in_on_block = False
+                continue
+
+            if in_on_block:
+                if not raw_line.startswith(" ") and not raw_line.startswith("\t"):
+                    in_on_block = False
+                elif re.match(r"\s{2,}[A-Za-z_][A-Za-z0-9_-]*\s*:", raw_line):
+                    trigger = raw_line.strip().split(":", 1)[0]
+                    triggers.append(trigger)
+                    continue
+
+            if in_jobs_block:
+                if not raw_line.startswith(" ") and not raw_line.startswith("\t"):
+                    in_jobs_block = False
+                elif re.match(r"\s{2,}[A-Za-z_][A-Za-z0-9_-]*\s*:", raw_line):
+                    job_name = raw_line.strip().split(":", 1)[0]
+                    jobs.append(job_name)
+
+        if workflow_name:
+            items.append(f"workflow: {workflow_name}")
+        if triggers:
+            items.append(f"triggers: {', '.join(self._dedupe_preserve_order(triggers)[:4])}")
+        if jobs:
+            items.append(f"jobs: {', '.join(self._dedupe_preserve_order(jobs)[:4])}")
+        return items[:5]
+
+    def _extract_dockerfile_summary(self, text: str) -> List[str]:
+        """Summarize Dockerfile base image and runtime commands."""
+        items = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            upper = line.upper()
+            if upper.startswith("FROM ") and not any(item.startswith("base image:") for item in items):
+                items.append(f"base image: {self._shorten_summary_value(line[5:], 60)}")
+            elif upper.startswith("EXPOSE ") and not any(item.startswith("exposes:") for item in items):
+                items.append(f"exposes: {self._shorten_summary_value(line[7:], 40)}")
+            elif upper.startswith("ENTRYPOINT ") and not any(item.startswith("entrypoint:") for item in items):
+                items.append(f"entrypoint: {self._shorten_summary_value(line[11:], 60)}")
+            elif upper.startswith("CMD ") and not any(item.startswith("cmd:") for item in items):
+                items.append(f"cmd: {self._shorten_summary_value(line[4:], 60)}")
+            if len(items) >= 4:
+                break
+        return items[:5]
+
+    def _extract_requirements_summary(self, text: str) -> List[str]:
+        """Summarize plain dependency lists like requirements.txt."""
+        deps = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("-r"):
+                continue
+            deps.append(line)
+            if len(deps) >= 8:
+                break
+        dep_names = self._extract_dependency_names(deps)
+        if not dep_names:
+            return []
+        return [f"dependencies: {', '.join(dep_names[:6])}"]
+
+    def _extract_file_summary(self, fname: str, rel_fname: str) -> Tuple[Optional[str], List[str]]:
+        """Extract deterministic summary bullets for important docs/config files."""
+        text = self.read_text_func_internal(fname)
+        if not text:
+            return None, []
+
+        normalized = self._normalize_rel_path(rel_fname).lower()
+        basename = Path(rel_fname).name.lower()
+
+        if basename.endswith((".md", ".rst", ".txt")) or basename.startswith("readme") or normalized.startswith("docs/"):
+            return "doc", self._extract_markdown_summary(text)
+        if basename == "package.json":
+            return "config", self._extract_package_json_summary(text)
+        if basename == "pyproject.toml":
+            return "config", self._extract_pyproject_summary(text)
+        if normalized.startswith(".github/workflows/") and basename.endswith((".yml", ".yaml")):
+            return "config", self._extract_workflow_summary(text)
+        if basename == "dockerfile" or basename.startswith("dockerfile."):
+            return "config", self._extract_dockerfile_summary(text)
+        if basename in {"requirements.txt", "pdm.lock"}:
+            return "config", self._extract_requirements_summary(text)
+
+        return None, []
+
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""
         text = self.read_text_func_internal(fname)
@@ -602,6 +842,8 @@ class RepoMap:
         related_sources: List[str],
         entrypoint_signals: List[str],
         public_api_signals: List[str],
+        summary_kind: Optional[str],
+        summary_items: List[str],
         mentioned_identifiers: List[str],
         inbound_neighbors: List[str],
         outbound_neighbors: List[str],
@@ -637,6 +879,14 @@ class RepoMap:
                 RankingReason(
                     "public_api_file",
                     f"Looks like a public API surface via: {', '.join(public_api_signals[:3])}.",
+                )
+            )
+        if summary_items:
+            reason_code = "doc_summary" if summary_kind == "doc" else "config_summary"
+            reasons.append(
+                RankingReason(
+                    reason_code,
+                    f"Structured summary extracted: {', '.join(summary_items[:2])}.",
                 )
             )
         if matched_query_path_terms:
@@ -958,6 +1208,8 @@ class RepoMap:
         total_references = 0
         tags_by_file: Dict[str, List[Tag]] = {}
         supplemental_tags_by_file: Dict[str, List[Tag]] = {}
+        summary_kind_by_file: Dict[str, str] = {}
+        summary_items_by_file: Dict[str, List[str]] = {}
         definitions_by_file: Dict[str, List[str]] = defaultdict(list)
         references_by_file: Dict[str, List[str]] = defaultdict(list)
         entrypoint_signals_by_file: Dict[str, List[str]] = {}
@@ -1024,6 +1276,11 @@ class RepoMap:
                 synthetic_tags = self._get_important_file_tags(fname, rel_fname)
                 if synthetic_tags:
                     supplemental_tags_by_file[fname] = synthetic_tags
+
+            summary_kind, summary_items = self._extract_file_summary(fname, rel_fname)
+            if summary_items:
+                summary_kind_by_file[rel_fname] = summary_kind or "config"
+                summary_items_by_file[rel_fname] = summary_items[:5]
 
             has_definitions = any(tag.kind == "def" for tag in tags)
             if is_test_file_by_rel.get(rel_fname, False) and not has_definitions:
@@ -1252,6 +1509,8 @@ class RepoMap:
             reference_names = self._dedupe_preserve_order(references_by_file.get(rel_fname, []))
             entrypoint_signals = entrypoint_signals_by_file.get(rel_fname, [])
             public_api_signals = public_api_signals_by_file.get(rel_fname, [])
+            summary_kind = summary_kind_by_file.get(rel_fname)
+            summary_items = summary_items_by_file.get(rel_fname, [])
             matched_query_path_terms = query_path_matches_by_file.get(rel_fname, [])
             matched_query_symbol_terms = query_symbol_matches_by_file.get(rel_fname, [])
             related_tests = related_tests_by_source.get(rel_fname, [])
@@ -1293,6 +1552,8 @@ class RepoMap:
                     related_sources=related_sources[:5],
                     entrypoint_signals=entrypoint_signals[:5],
                     public_api_signals=public_api_signals[:5],
+                    summary_kind=summary_kind,
+                    summary_items=summary_items[:5],
                     mentioned_identifiers=mentioned_identifiers,
                     sample_symbols=(definition_names or reference_names or [Path(rel_fname).name])[:5],
                     inbound_neighbors=inbound_neighbors[:5],
@@ -1315,6 +1576,8 @@ class RepoMap:
                         related_sources=related_sources,
                         entrypoint_signals=entrypoint_signals,
                         public_api_signals=public_api_signals,
+                        summary_kind=summary_kind,
+                        summary_items=summary_items,
                         mentioned_identifiers=mentioned_identifiers,
                         inbound_neighbors=inbound_neighbors,
                         outbound_neighbors=outbound_neighbors,
@@ -1326,6 +1589,8 @@ class RepoMap:
 
         ranked_files.sort(key=lambda entry: entry.rank, reverse=True)
         file_report.ranked_files = ranked_files
+        self.file_summary_by_file = {path: items[:] for path, items in summary_items_by_file.items()}
+        self.file_summary_kind_by_file = summary_kind_by_file.copy()
         
         # Sort by rank (descending)
         ranked_tags.sort(key=lambda x: x[0], reverse=True)
@@ -1376,6 +1641,39 @@ class RepoMap:
             reverse=True
         )
 
+    def _format_summary_block(self, rel_fname: str) -> str:
+        """Format structured summary bullets for a file when available."""
+        summary_items = self.file_summary_by_file.get(rel_fname, [])
+        if not summary_items:
+            return ""
+
+        summary_kind = self.file_summary_kind_by_file.get(rel_fname)
+        label = "Doc Highlights" if summary_kind == "doc" else "Config Highlights"
+        summary_lines = [f"({label})"]
+        summary_lines.extend(f"- {item}" for item in summary_items[:5])
+        return "\n".join(summary_lines)
+
+    def _render_file_section(self, rel_fname: str, file_tag_list: List[Tuple[float, Tag]]) -> str:
+        """Render one file's final map section including summaries."""
+        lois = [tag.line for rank, tag in file_tag_list]
+        abs_fname = str(self.root / rel_fname)
+        max_rank = max(rank for rank, tag in file_tag_list)
+
+        rendered = self.render_tree(abs_fname, rel_fname, lois)
+        if not rendered:
+            return ""
+
+        rendered_lines = rendered.splitlines()
+        first_line = rendered_lines[0]
+        code_lines = rendered_lines[1:]
+        summary_block = self._format_summary_block(rel_fname)
+        sections = [f"{first_line}\n(Rank value: {max_rank:.4f})"]
+        if summary_block:
+            sections.append(summary_block)
+        if code_lines:
+            sections.append("\n".join(code_lines))
+        return "\n\n".join(section for section in sections if section)
+
     def to_tree(self, sorted_files: List[Tuple[str, List[Tuple[float, Tag]]]]) -> str:
         """Convert pre-sorted files and tags to formatted tree output."""
         if not sorted_files:
@@ -1384,21 +1682,9 @@ class RepoMap:
         tree_parts = []
 
         for rel_fname, file_tag_list in sorted_files:
-            lois = [tag.line for rank, tag in file_tag_list]
-            abs_fname = str(self.root / rel_fname)
-            max_rank = max(rank for rank, tag in file_tag_list)
-
-            rendered = self.render_tree(abs_fname, rel_fname, lois)
+            rendered = self._render_file_section(rel_fname, file_tag_list)
             if rendered:
-                rendered_lines = rendered.splitlines()
-                first_line = rendered_lines[0]
-                code_lines = rendered_lines[1:]
-
-                tree_parts.append(
-                    f"{first_line}\n"
-                    f"(Rank value: {max_rank:.4f})\n\n"
-                    + "\n".join(code_lines)
-                )
+                tree_parts.append(rendered)
 
         return "\n\n".join(tree_parts)
     
@@ -1469,9 +1755,7 @@ class RepoMap:
         fitting_files = []
         for entry in sorted_files_with_tags:
             rel_fname, file_tag_list = entry
-            lois = [tag.line for _, tag in file_tag_list]
-            abs_fname = str(self.root / rel_fname)
-            rendered = self.render_tree(abs_fname, rel_fname, lois)
+            rendered = self._render_file_section(rel_fname, file_tag_list)
             if rendered and self.token_count(rendered) <= max_map_tokens:
                 fitting_files.append(entry)
 
@@ -1537,6 +1821,8 @@ class RepoMap:
         self.diagnostics = []
         self._tag_failures = {}
         self._uncacheable_tag_failures = set()
+        self.file_summary_by_file = {}
+        self.file_summary_kind_by_file = {}
             
         # Create empty report for error cases
         empty_report = FileReport(
