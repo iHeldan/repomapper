@@ -258,7 +258,7 @@ related_test = 1.2
 
 Supported config knobs:
 
-- `include` / `exclude`: repository-relative glob patterns that scope the files considered by ranking, tracing, and impact analysis
+- `include` / `exclude`: repository-relative glob patterns that scope the files considered by ranking, tracing, and impact analysis. `**` matches nested subtrees such as `opensrc/**`, and a trailing slash like `opensrc/` also excludes that whole prefix.
 - `important_files`: extra docs/config/contracts that should stay visible even without parser-extracted symbols
 - `[frameworks]`: additional entrypoint/public API filenames and directory signals
 - `[tests]`: extra test directories, extra integration markers, and optional runner overrides for `pytest`, `vitest`, `jest`, or `mocha`
@@ -290,9 +290,10 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 For budget-sensitive workflows, pass `token_limit="auto"` or `token_limit="small"|"medium"|"large"` (or a structured object like `{"mode":"ai_guided","hint":"large"}`) to let an agent steer map size without hard-coding a number.
 The `report` payload also includes structured `ranked_files`, `selected_files`, `map_tokens`, and map-budget metadata fields for agent-friendly follow-up logic.
-To keep MCP responses manageable in large repositories, `repo_map` now returns only the top 50 `ranked_files` entries by default, plus `ranked_files_total`, `ranked_files_returned`, `ranked_files_omitted`, and `ranked_files_truncated` summary fields.
+To keep MCP responses manageable in large repositories, `repo_map` now returns only the top 20 `ranked_files` entries by default, plus `ranked_files_total`, `ranked_files_returned`, `ranked_files_omitted`, and `ranked_files_truncated` summary fields.
 The MCP report also includes a compact `ranked_files_preview` top-list and `ranked_files_counts` summary so an agent can still see the highest-signal paths and role mix without loading every detailed ranked row.
-Pass `ranked_files_limit=0` to return the full ranked file list, or `include_ranked_files=false` to omit detailed ranked file rows entirely while keeping the summary counters.
+Large exclusion lists are also summarized by default: the MCP report returns only the top 20 `excluded` rows plus `excluded_total`, `excluded_returned`, `excluded_omitted`, `excluded_truncated`, `excluded_preview`, and `excluded_reason_counts`.
+Pass `ranked_files_limit=0` to return the full ranked file list, or `include_ranked_files=false` to omit detailed ranked file rows entirely while keeping the summary counters. Likewise, pass `excluded_limit=0` or `include_excluded=false` to control the detailed excluded-file rows.
 The server also exposes `trace_file_path` for shortest-path explanations between two files. Its response now includes symbol-level evidence such as callsites, imports, TS/JS re-exports, and Python package-boundary hops.
 The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, symbol-level path evidence, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
 The server also exposes `review_changes` for PR/review-style workflows. It combines git-changed files, branch metadata, changed diff anchors, public API and entrypoint surfaces, grouped nearby tests, and a prioritized `review_focus` queue on top of the existing impact analysis payload.

@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 import dataclasses
 import os
 import logging
@@ -39,8 +40,10 @@ def _validate_path_containment(file_path: str, root_str: str) -> bool:
 
 # R3 Finding B2-1: Cache RepoMap instances for search_identifiers
 _REPO_MAP_CACHE: Dict[str, Any] = {}
-_DEFAULT_MCP_RANKED_FILES_LIMIT = 50
+_DEFAULT_MCP_RANKED_FILES_LIMIT = 20
 _DEFAULT_MCP_RANKED_FILES_PREVIEW_LIMIT = 10
+_DEFAULT_MCP_EXCLUDED_LIMIT = 20
+_DEFAULT_MCP_EXCLUDED_PREVIEW_LIMIT = 10
 
 
 def _get_project_state(file_paths: List[str]) -> tuple:
@@ -60,11 +63,15 @@ def _serialize_repo_map_report(
     *,
     include_ranked_files: bool = True,
     ranked_files_limit: Optional[int] = _DEFAULT_MCP_RANKED_FILES_LIMIT,
+    include_excluded: bool = True,
+    excluded_limit: Optional[int] = _DEFAULT_MCP_EXCLUDED_LIMIT,
 ) -> Dict[str, Any]:
-    """Serialize FileReport with MCP-friendly ranked_files trimming."""
+    """Serialize FileReport with MCP-friendly ranked_files and excluded trimming."""
     report = dataclasses.asdict(file_report)
     ranked_files = report.get("ranked_files") or []
     total_ranked_files = len(ranked_files)
+    excluded_items = sorted((report.get("excluded") or {}).items())
+    total_excluded = len(excluded_items)
 
     if not include_ranked_files:
         returned_ranked_files = []
@@ -111,6 +118,28 @@ def _serialize_repo_map_report(
         "public_api_files": sum(1 for entry in ranked_files if entry.get("is_public_api_file")),
         "important_files": sum(1 for entry in ranked_files if entry.get("is_important_file")),
     }
+
+    if not include_excluded:
+        returned_excluded_items = []
+    elif excluded_limit is None or excluded_limit <= 0:
+        returned_excluded_items = excluded_items
+    else:
+        returned_excluded_items = excluded_items[:excluded_limit]
+
+    report["excluded"] = dict(returned_excluded_items)
+    report["excluded_total"] = total_excluded
+    report["excluded_returned"] = len(returned_excluded_items)
+    report["excluded_omitted"] = max(0, total_excluded - len(returned_excluded_items))
+    report["excluded_truncated"] = len(returned_excluded_items) < total_excluded
+    report["excluded_limit_applied"] = (
+        None if not include_excluded or excluded_limit is None or excluded_limit <= 0 else excluded_limit
+    )
+    report["excluded_preview_limit"] = _DEFAULT_MCP_EXCLUDED_PREVIEW_LIMIT
+    report["excluded_preview"] = [
+        {"path": path, "reason": reason}
+        for path, reason in excluded_items[:_DEFAULT_MCP_EXCLUDED_PREVIEW_LIMIT]
+    ]
+    report["excluded_reason_counts"] = dict(sorted(Counter(reason for _, reason in excluded_items).items()))
     return report
 
 # Configure logging - only show errors
@@ -158,6 +187,8 @@ async def repo_map(
     max_context_window: Optional[int] = None,
     include_ranked_files: bool = True,
     ranked_files_limit: int = _DEFAULT_MCP_RANKED_FILES_LIMIT,
+    include_excluded: bool = True,
+    excluded_limit: int = _DEFAULT_MCP_EXCLUDED_LIMIT,
 ) -> Dict[str, Any]:
     """Generate a repository map for the specified files, providing a list of function prototypes and variables for files as well as relevant related
     files. Provide filenames relative to the project_root. In addition to the files provided, relevant related files will also be included with a
@@ -181,19 +212,23 @@ async def repo_map(
     :param max_context_window: Optional maximum context window size for token calculation, used to adjust map token limit when no chat files are provided.
     :param include_ranked_files: If False, omit detailed ranked_files entries from the MCP report while keeping summary counters.
     :param ranked_files_limit: Maximum number of ranked_files entries to include in the MCP report. Use 0 to return the full list.
+    :param include_excluded: If False, omit detailed excluded entries from the MCP report while keeping summary counters.
+    :param excluded_limit: Maximum number of excluded entries to include in the MCP report. Use 0 to return the full list.
     :returns: A dictionary containing:
         - 'map': the generated repository map string
         - 'report': a dictionary with file processing details including:
-            - 'excluded': dictionary of excluded files with reasons
+            - 'excluded': dictionary of excluded files with reasons (top 20 by default in MCP)
             - 'definition_matches': count of matched definitions
             - 'reference_matches': count of matched references
             - 'total_files_considered': total files processed
             - 'map_token_budget' / 'map_token_budget_mode': the effective cap and whether it was fixed vs auto/AI-guided
             - 'query' / 'query_terms': task query context used for ranking, when provided
             - 'changed_files' / 'changed_neighbor_depth': changed-file focus metadata for impact views
-            - 'ranked_files': per-file rank metadata and reason codes (top 50 by default in MCP)
+            - 'ranked_files': per-file rank metadata and reason codes (top 20 by default in MCP)
             - 'ranked_files_total' / 'ranked_files_returned' / 'ranked_files_truncated': summary metadata for omitted ranked file rows
             - 'ranked_files_preview': a compact top-ranked preview that stays small even for large repositories
+            - 'excluded_total' / 'excluded_returned' / 'excluded_truncated': summary metadata for omitted excluded rows
+            - 'excluded_preview': a compact list of excluded path samples and reasons
         Or an 'error' key if an error occurred.
     """
     if error := _check_project_root(project_root):
@@ -291,6 +326,8 @@ async def repo_map(
                 file_report,
                 include_ranked_files=include_ranked_files,
                 ranked_files_limit=ranked_files_limit,
+                include_excluded=include_excluded,
+                excluded_limit=excluded_limit,
             ),
         }
     except Exception as e:

@@ -15,6 +15,7 @@ import git_support
 import parser_support
 import repomap
 import repomap_budget
+import repomap_config
 import repomap_eval
 import repomap_class
 from repomap_class import FileReport, RankedFile, RankingReason, RepoMap, Tag
@@ -1258,6 +1259,26 @@ class RepoMapReviewTests(unittest.TestCase):
 
 
 class RepoMapConfigTests(unittest.TestCase):
+    def test_repo_config_recursive_globs_match_nested_paths(self):
+        self.assertTrue(
+            repomap_config._matches_path_pattern(
+                "opensrc/repos/github.com/nuxt/content/index.ts",
+                "opensrc/**",
+            )
+        )
+        self.assertTrue(
+            repomap_config._matches_path_pattern(
+                "src/features/auth/routes.py",
+                "src/**/routes.py",
+            )
+        )
+        self.assertFalse(
+            repomap_config._matches_path_pattern(
+                "src/features/auth/routes.py",
+                "src/*.py",
+            )
+        )
+
     def test_repo_config_scopes_files_and_keeps_custom_important_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -2364,19 +2385,60 @@ class RepoMapServerTests(unittest.TestCase):
                         result = asyncio.run(repomap_server.repo_map(str(root)))
 
             self.assertEqual(result["report"]["ranked_files_total"], 120)
-            self.assertEqual(result["report"]["ranked_files_returned"], 50)
-            self.assertEqual(result["report"]["ranked_files_omitted"], 70)
+            self.assertEqual(result["report"]["ranked_files_returned"], 20)
+            self.assertEqual(result["report"]["ranked_files_omitted"], 100)
             self.assertTrue(result["report"]["ranked_files_truncated"])
-            self.assertEqual(result["report"]["ranked_files_limit_applied"], 50)
-            self.assertEqual(len(result["report"]["ranked_files"]), 50)
+            self.assertEqual(result["report"]["ranked_files_limit_applied"], 20)
+            self.assertEqual(len(result["report"]["ranked_files"]), 20)
             self.assertEqual(result["report"]["ranked_files"][0]["path"], "src/file_000.py")
-            self.assertEqual(result["report"]["ranked_files"][-1]["path"], "src/file_049.py")
+            self.assertEqual(result["report"]["ranked_files"][-1]["path"], "src/file_019.py")
             self.assertEqual(result["report"]["ranked_files_preview_limit"], 10)
             self.assertEqual(len(result["report"]["ranked_files_preview"]), 10)
             self.assertEqual(result["report"]["ranked_files_preview"][0]["path"], "src/file_000.py")
             self.assertEqual(result["report"]["ranked_files_preview"][-1]["path"], "src/file_009.py")
             self.assertEqual(result["report"]["ranked_files_counts"]["changed_files"], 0)
             self.assertEqual(result["report"]["ranked_files_counts"]["test_files"], 0)
+
+    def test_repo_map_truncates_excluded_entries_in_mcp_report_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            excluded = {
+                f"vendor/file_{index:03d}.ts": "Matched configured exclude pattern"
+                for index in range(120)
+            }
+
+            def fake_get_repo_map(self, **kwargs):
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded=excluded,
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=121,
+                    ranked_files=[],
+                    selected_files=["app.py"],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(source_file)]):
+                    with mock.patch.object(RepoMap, "get_repo_map", new=fake_get_repo_map):
+                        result = asyncio.run(repomap_server.repo_map(str(root)))
+
+            self.assertEqual(result["report"]["excluded_total"], 120)
+            self.assertEqual(result["report"]["excluded_returned"], 20)
+            self.assertEqual(result["report"]["excluded_omitted"], 100)
+            self.assertTrue(result["report"]["excluded_truncated"])
+            self.assertEqual(result["report"]["excluded_limit_applied"], 20)
+            self.assertEqual(len(result["report"]["excluded"]), 20)
+            self.assertEqual(next(iter(result["report"]["excluded"])), "vendor/file_000.ts")
+            self.assertEqual(result["report"]["excluded_preview_limit"], 10)
+            self.assertEqual(len(result["report"]["excluded_preview"]), 10)
+            self.assertEqual(result["report"]["excluded_preview"][0]["path"], "vendor/file_000.ts")
+            self.assertEqual(
+                result["report"]["excluded_reason_counts"]["Matched configured exclude pattern"],
+                120,
+            )
 
     def test_repo_map_can_return_full_or_omitted_ranked_files_in_mcp_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2444,6 +2506,59 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(omitted_result["report"]["ranked_files"], [])
             self.assertEqual(len(omitted_result["report"]["ranked_files_preview"]), 3)
             self.assertEqual(omitted_result["report"]["ranked_files_preview"][2]["path"], "src/file_002.py")
+
+    def test_repo_map_can_return_full_or_omitted_excluded_entries_in_mcp_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            excluded = {
+                f"vendor/file_{index:03d}.ts": "Matched configured exclude pattern"
+                for index in range(3)
+            }
+
+            def fake_get_repo_map(self, **kwargs):
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded=excluded,
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=4,
+                    ranked_files=[],
+                    selected_files=["app.py"],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(source_file)]):
+                    with mock.patch.object(RepoMap, "get_repo_map", new=fake_get_repo_map):
+                        full_result = asyncio.run(
+                            repomap_server.repo_map(
+                                str(root),
+                                excluded_limit=0,
+                            )
+                        )
+                        omitted_result = asyncio.run(
+                            repomap_server.repo_map(
+                                str(root),
+                                include_excluded=False,
+                            )
+                        )
+
+            self.assertEqual(full_result["report"]["excluded_total"], 3)
+            self.assertEqual(full_result["report"]["excluded_returned"], 3)
+            self.assertFalse(full_result["report"]["excluded_truncated"])
+            self.assertIsNone(full_result["report"]["excluded_limit_applied"])
+            self.assertEqual(len(full_result["report"]["excluded"]), 3)
+            self.assertEqual(len(full_result["report"]["excluded_preview"]), 3)
+
+            self.assertEqual(omitted_result["report"]["excluded_total"], 3)
+            self.assertEqual(omitted_result["report"]["excluded_returned"], 0)
+            self.assertEqual(omitted_result["report"]["excluded_omitted"], 3)
+            self.assertTrue(omitted_result["report"]["excluded_truncated"])
+            self.assertIsNone(omitted_result["report"]["excluded_limit_applied"])
+            self.assertEqual(omitted_result["report"]["excluded"], {})
+            self.assertEqual(len(omitted_result["report"]["excluded_preview"]), 3)
+            self.assertEqual(omitted_result["report"]["excluded_preview"][2]["path"], "vendor/file_002.ts")
 
     def test_repo_map_passes_query_to_repo_mapper(self):
         with tempfile.TemporaryDirectory() as tmpdir:

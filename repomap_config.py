@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Callable, List, Optional, Tuple
 
@@ -97,14 +98,32 @@ def _matches_path_pattern(rel_path: str, pattern: str) -> bool:
             or basename == normalized_pattern
         )
 
-    rel_path_obj = PurePosixPath(rel_value)
-    if rel_path_obj.match(normalized_pattern):
-        return True
-
     if "/" not in normalized_pattern:
-        return fnmatch.fnmatch(rel_path_obj.name, normalized_pattern)
+        return fnmatch.fnmatchcase(PurePosixPath(rel_value).name, normalized_pattern)
 
-    return False
+    rel_parts = tuple(part for part in rel_value.split("/") if part)
+    pattern_parts = tuple(part for part in normalized_pattern.split("/") if part)
+
+    @lru_cache(maxsize=None)
+    def _matches_parts(path_index: int, pattern_index: int) -> bool:
+        if pattern_index >= len(pattern_parts):
+            return path_index >= len(rel_parts)
+
+        current_pattern = pattern_parts[pattern_index]
+        if current_pattern == "**":
+            return _matches_parts(path_index, pattern_index + 1) or (
+                path_index < len(rel_parts) and _matches_parts(path_index + 1, pattern_index)
+            )
+
+        if path_index >= len(rel_parts):
+            return False
+
+        if not fnmatch.fnmatchcase(rel_parts[path_index], current_pattern):
+            return False
+
+        return _matches_parts(path_index + 1, pattern_index + 1)
+
+    return _matches_parts(0, 0)
 
 
 @dataclass(frozen=True)
