@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 import diskcache
 import networkx as nx
+from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
 from grep_ast import TreeContext
 from utils import count_tokens, read_text
 from scm import get_scm_fname
@@ -153,39 +154,52 @@ class RepoMap:
     def get_mtime(self, fname: str) -> Optional[float]:
         """Get file modification time."""
         try:
-            return os.path.getmtime(fname)
+            return os.stat(fname).st_mtime_ns
         except OSError:
             return None
     
     def get_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Get tags for a file, using cache when possible."""
-        # Check in-memory cache first to avoid diskcache SQLite round-trips (Finding #6)
-        if fname in self._local_tags_cache:
-            return self._local_tags_cache[fname]
-
         file_mtime = self.get_mtime(fname)
         if file_mtime is None:
             return []
+
+        # Check in-memory cache first to avoid diskcache SQLite round-trips (Finding #6)
+        local_entry = self._local_tags_cache.get(fname)
+        if local_entry and local_entry.get("mtime") == file_mtime:
+            return local_entry["data"]
 
         try:
             cached_entry = self.TAGS_CACHE.get(fname)
 
             if cached_entry and cached_entry.get("mtime") == file_mtime:
-                self._local_tags_cache[fname] = cached_entry["data"]
+                self._local_tags_cache[fname] = cached_entry
                 return cached_entry["data"]
         except SQLITE_ERRORS:
             self.tags_cache_error()
 
         # Cache miss or file changed
         tags = self.get_tags_raw(fname, rel_fname)
+        cache_entry = {"mtime": file_mtime, "data": tags}
 
         try:
-            self.TAGS_CACHE[fname] = {"mtime": file_mtime, "data": tags}
+            self.TAGS_CACHE[fname] = cache_entry
         except SQLITE_ERRORS:
             self.tags_cache_error()
 
-        self._local_tags_cache[fname] = tags
+        self._local_tags_cache[fname] = cache_entry
         return tags
+
+    def _calculate_pagerank(self, graph: nx.MultiDiGraph, personalization: Dict[str, float]) -> Dict[str, float]:
+        """Run PageRank with a pure-Python fallback when scipy/numpy is unavailable."""
+        pagerank_kwargs = {"alpha": 0.85}
+        if personalization:
+            pagerank_kwargs["personalization"] = personalization
+
+        try:
+            return nx.pagerank(graph, **pagerank_kwargs)
+        except (ImportError, ModuleNotFoundError):
+            return _pagerank_python(graph, **pagerank_kwargs)
     
     def get_tags_raw(self, fname: str, rel_fname: str) -> List[Tag]:
         """Parse file to extract tags using Tree-sitter."""
@@ -424,10 +438,7 @@ class RepoMap:
         
         # Run PageRank
         try:
-            if personalization:
-                ranks = nx.pagerank(G, personalization=personalization, alpha=0.85)
-            else:
-                ranks = {node: 1.0 for node in G.nodes()}
+            ranks = self._calculate_pagerank(G, personalization)
         except Exception:
             # Fallback to uniform ranking
             ranks = {node: 1.0 for node in G.nodes()}
@@ -478,7 +489,8 @@ class RepoMap:
     def render_tree(self, abs_fname: str, rel_fname: str, lois: List[int]) -> str:
         """Render a code snippet with specific lines of interest."""
         # Cache formatted result per (file, lois) to avoid re-rendering in binary search
-        cache_key = (rel_fname, tuple(sorted(set(lois))))
+        file_mtime = self.get_mtime(abs_fname)
+        cache_key = (rel_fname, file_mtime, tuple(sorted(set(lois))))
         if cache_key in self.tree_context_cache:
             return self.tree_context_cache[cache_key]
 

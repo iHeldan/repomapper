@@ -15,6 +15,20 @@ from utils import count_tokens, read_text, find_src_files
 from repomap_class import RepoMap
 
 
+def resolve_repo_path(root_path: Path, path_str: str) -> Path:
+    """Resolve CLI file arguments relative to the repository root."""
+    path = Path(path_str)
+    return path if path.is_absolute() else root_path / path
+
+
+def expand_path_specs(root_path: Path, path_specs: list[str]) -> list[str]:
+    """Expand file/directory specs into absolute file paths."""
+    expanded_paths = []
+    for path_spec in path_specs:
+        expanded_paths.extend(find_src_files(str(resolve_repo_path(root_path, path_spec))))
+    return [str(Path(path).resolve()) for path in expanded_paths]
+
+
 def tool_output(*messages):
     """Print informational messages."""
     print(*messages, file=sys.stdout)
@@ -131,6 +145,7 @@ Examples:
     }
     
     # Process file arguments
+    root_path = Path(args.root).resolve()
     chat_files_from_args = args.chat_files or [] # These are the paths as strings from the CLI
     
     # Determine the list of unresolved path specifications that will form the 'other_files'
@@ -142,18 +157,9 @@ Examples:
         unresolved_paths_for_other_files_specs.extend(args.paths)
     # If neither, unresolved_paths_for_other_files_specs remains empty.
 
-    # Now, expand all directory paths in unresolved_paths_for_other_files_specs into actual file lists
-    # and collect all file paths. find_src_files handles both files and directories.
-    effective_other_files_unresolved = []
-    for path_spec_str in unresolved_paths_for_other_files_specs:
-        effective_other_files_unresolved.extend(find_src_files(path_spec_str))
-    
-    # Convert to absolute paths
-    root_path = Path(args.root).resolve()
-    # chat_files for RepoMap are from --chat-files argument, resolved.
-    chat_files = [str(Path(f).resolve()) for f in chat_files_from_args]
-    # other_files for RepoMap are the effective_other_files, resolved after expansion.
-    other_files = [str(Path(f).resolve()) for f in effective_other_files_unresolved]
+    # Expand relative path specs against the repository root before collecting files.
+    chat_files = [str(resolve_repo_path(root_path, f).resolve()) for f in chat_files_from_args]
+    other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
 
     if args.verbose:
         tool_output(f"Chat files: {chat_files}")

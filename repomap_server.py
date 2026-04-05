@@ -37,6 +37,18 @@ def _validate_path_containment(file_path: str, root_str: str) -> bool:
 # R3 Finding B2-1: Cache RepoMap instances for search_identifiers
 _REPO_MAP_CACHE: Dict[str, Any] = {}
 
+
+def _get_project_state(file_paths: List[str]) -> tuple:
+    """Build a cheap fingerprint so cached search indexes can be invalidated on edits."""
+    state = []
+    for file_path in file_paths:
+        try:
+            stat_result = os.stat(file_path)
+        except OSError:
+            continue
+        state.append((file_path, stat_result.st_mtime_ns, stat_result.st_size))
+    return tuple(sorted(state))
+
 # Configure logging - only show errors
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.ERROR)
@@ -213,15 +225,18 @@ async def search_identifiers(
             )
         repo_map = _REPO_MAP_CACHE[project_root]
 
-        # R4 Finding B2-F1: Build and cache project-wide tags index on first search
-        if not hasattr(repo_map, '_project_tags_index'):
-            all_files = find_src_files(project_root)
+        all_files = find_src_files(project_root)
+        project_state = _get_project_state(all_files)
+
+        # Rebuild cached search index whenever any tracked file changes.
+        if getattr(repo_map, '_project_tags_index_state', None) != project_state:
             all_tags = []
             for file_path in all_files:
-                rel_path = str(Path(file_path).relative_to(project_root))
+                rel_path = repo_map.get_rel_fname(file_path)
                 tags = repo_map.get_tags(file_path, rel_path)
                 all_tags.extend(tags)
             repo_map._project_tags_index = all_tags
+            repo_map._project_tags_index_state = project_state
         all_tags = repo_map._project_tags_index
 
         matching_tags = []
