@@ -167,6 +167,8 @@ class ImpactQuickAction:
     risk_level: str = "low"
     why_now: Optional[str] = None
     expected_outcome: Optional[str] = None
+    follow_if_true: Optional[str] = None
+    follow_if_false: Optional[str] = None
     location_hint: Optional[str] = None
     command_hint: Optional[str] = None
     seed_file: Optional[str] = None
@@ -1612,6 +1614,7 @@ class RepoMap:
         def add_action(
             suggestion: ImpactSuggestion,
             *,
+            target: Optional[ImpactTarget],
             kind: str,
             message: str,
             priority: Optional[int] = None,
@@ -1631,7 +1634,11 @@ class RepoMap:
             if kind == "run_nearby_test":
                 command_hint = self._suggest_test_command(suggestion.target)
 
-            risk_level, why_now, expected_outcome = self._describe_quick_action(kind, target, suggestion)
+            risk_level, why_now, expected_outcome, follow_if_true, follow_if_false = self._describe_quick_action(
+                kind,
+                target,
+                suggestion,
+            )
 
             quick_actions.append(
                 ImpactQuickAction(
@@ -1643,6 +1650,8 @@ class RepoMap:
                     risk_level=risk_level,
                     why_now=why_now,
                     expected_outcome=expected_outcome,
+                    follow_if_true=follow_if_true,
+                    follow_if_false=follow_if_false,
                     location_hint=location_hint,
                     command_hint=command_hint,
                     seed_file=suggestion.seed_file,
@@ -1660,6 +1669,7 @@ class RepoMap:
             if suggestion.kind == "review_changed_symbol_boundary":
                 add_action(
                     suggestion,
+                    target=target,
                     kind="open_changed_boundary",
                     message="Open this changed boundary first and verify the nearby symbol contract.",
                     priority=0,
@@ -1667,6 +1677,7 @@ class RepoMap:
             elif suggestion.kind == "review_test":
                 add_action(
                     suggestion,
+                    target=target,
                     kind="run_nearby_test",
                     message="Run or inspect this nearby test before making broader edits.",
                     priority=0 if target and target.distance == 1 else 1,
@@ -1674,6 +1685,7 @@ class RepoMap:
             elif suggestion.kind == "review_config":
                 add_action(
                     suggestion,
+                    target=target,
                     kind="check_config_assumption",
                     message="Verify this config assumption before changing deeper logic.",
                     priority=1,
@@ -1681,6 +1693,7 @@ class RepoMap:
             elif suggestion.kind == "inspect_neighbor" and target and target.distance == 1:
                 add_action(
                     suggestion,
+                    target=target,
                     kind="open_direct_neighbor",
                     message="Open this one-hop neighbor at the anchored line first.",
                     priority=2,
@@ -1690,6 +1703,7 @@ class RepoMap:
             first = suggested_checks[0]
             add_action(
                 first,
+                target=impacted_by_path.get(first.target),
                 kind="start_here",
                 message="Start with the first anchored follow-up item.",
                 priority=first.priority,
@@ -1703,7 +1717,7 @@ class RepoMap:
         kind: str,
         target: Optional[ImpactTarget],
         suggestion: ImpactSuggestion,
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, str, str]:
         """Provide compact prioritization and success criteria for a quick action."""
         seed_file = suggestion.seed_file or "the seed file"
 
@@ -1712,6 +1726,8 @@ class RepoMap:
                 "low",
                 f"This is the fastest validation signal close to {seed_file}.",
                 "Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+                "If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
+                "If it passes, continue with the nearest non-test impact boundary or direct neighbor.",
             )
 
         if kind == "open_changed_boundary":
@@ -1720,11 +1736,15 @@ class RepoMap:
                     "low",
                     f"This boundary is only {target.closest_changed_hunk_distance} line(s) from the changed hunk.",
                     "Confirm whether this boundary symbol or call site needs a matching update.",
+                    "If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+                    "If it does not, move to the next closest impacted file or config assumption.",
                 )
             return (
                 "low",
                 "This is the narrowest downstream boundary touched by the changed symbol.",
                 "Confirm whether the downstream boundary still matches the changed symbol contract.",
+                "If it does not match, update connected callers and nearby tests next.",
+                "If it still matches, continue to the next impacted boundary on the path.",
             )
 
         if kind == "open_direct_neighbor":
@@ -1732,6 +1752,8 @@ class RepoMap:
                 "low",
                 "A one-hop neighbor is usually the smallest non-test file worth checking next.",
                 "Confirm whether the closest neighboring file is affected or can be ruled out quickly.",
+                "If it is affected, keep expanding along its boundary symbols and related tests.",
+                "If it is not, deprioritize this branch and inspect the next quick action.",
             )
 
         if kind == "check_config_assumption":
@@ -1739,6 +1761,8 @@ class RepoMap:
                 "medium",
                 "Config mismatches can invalidate the rest of the impact trail quickly.",
                 "Confirm whether configuration still matches the changed execution path or test setup.",
+                "If config changed, review entrypoints, setup docs, and the tests that depend on it.",
+                "If config is unchanged, return to code-level boundaries and neighbors.",
             )
 
         if kind == "start_here":
@@ -1746,12 +1770,16 @@ class RepoMap:
                 "medium",
                 "No lower-risk shortcut was found, so this is the best anchored starting point.",
                 "Collect the first concrete signal about whether the impact trail is real.",
+                "If you find a concrete mismatch, pivot toward the closest affected boundary and tests.",
+                "If you do not, continue down the remaining suggested checks in priority order.",
             )
 
         return (
             "low",
             "This is an anchored next step near the current impact boundary.",
             "Confirm whether this anchored boundary changes the likely follow-up path.",
+            "If it does, continue along the impacted branch from this point outward.",
+            "If it does not, step back and inspect the next prioritized action.",
         )
 
     def _suggest_test_command(self, rel_path: str) -> Optional[str]:

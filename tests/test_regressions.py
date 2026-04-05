@@ -524,6 +524,14 @@ class RepoMapRankingTests(unittest.TestCase):
                 first_action.expected_outcome,
                 "Confirm whether the nearby test already passes or pinpoints the broken behavior.",
             )
+            self.assertEqual(
+                first_action.follow_if_true,
+                "If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
+            )
+            self.assertEqual(
+                first_action.follow_if_false,
+                "If it passes, continue with the nearest non-test impact boundary or direct neighbor.",
+            )
             self.assertEqual(first_action.location_hint, "tests/test_service.py:1")
             self.assertEqual(first_action.command_hint, "pytest tests/test_service.py")
             first_suggestion = report.suggested_checks[0]
@@ -589,6 +597,14 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(
                 report.quick_actions[0].expected_outcome,
                 "Confirm whether this boundary symbol or call site needs a matching update.",
+            )
+            self.assertEqual(
+                report.quick_actions[0].follow_if_true,
+                "If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+            )
+            self.assertEqual(
+                report.quick_actions[0].follow_if_false,
+                "If it does not, move to the next closest impacted file or config assumption.",
             )
             self.assertEqual(report.quick_actions[0].location_hint, "service.py:1")
             self.assertIsNone(report.quick_actions[0].command_hint)
@@ -1048,6 +1064,8 @@ class CliPathResolutionTests(unittest.TestCase):
                             risk_level="low",
                             why_now="This boundary is only 0 line(s) from the changed hunk.",
                             expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
+                            follow_if_true="If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+                            follow_if_false="If it does not, move to the next closest impacted file or config assumption.",
                             location_hint="service.py:1",
                             command_hint=None,
                             seed_file="app.py",
@@ -1126,6 +1144,14 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(
                 payload["quick_actions"][0]["expected_outcome"],
                 "Confirm whether this boundary symbol or call site needs a matching update.",
+            )
+            self.assertEqual(
+                payload["quick_actions"][0]["follow_if_true"],
+                "If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+            )
+            self.assertEqual(
+                payload["quick_actions"][0]["follow_if_false"],
+                "If it does not, move to the next closest impacted file or config assumption.",
             )
             self.assertEqual(payload["quick_actions"][0]["location_hint"], "service.py:1")
             self.assertIsNone(payload["quick_actions"][0]["command_hint"])
@@ -1356,6 +1382,8 @@ class RepoMapServerTests(unittest.TestCase):
                             risk_level="low",
                             why_now="This is the fastest validation signal close to app.py.",
                             expected_outcome="Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+                            follow_if_true="If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
+                            follow_if_false="If it passes, continue with the nearest non-test impact boundary or direct neighbor.",
                             location_hint="service.py:1",
                             command_hint="pytest tests/test_app.py",
                             seed_file="app.py",
@@ -1418,6 +1446,14 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(
                 result["quick_actions"][0]["expected_outcome"],
                 "Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+            )
+            self.assertEqual(
+                result["quick_actions"][0]["follow_if_true"],
+                "If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
+            )
+            self.assertEqual(
+                result["quick_actions"][0]["follow_if_false"],
+                "If it passes, continue with the nearest non-test impact boundary or direct neighbor.",
             )
             self.assertEqual(result["quick_actions"][0]["location_hint"], "service.py:1")
             self.assertEqual(result["quick_actions"][0]["command_hint"], "pytest tests/test_app.py")

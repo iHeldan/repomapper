@@ -176,6 +176,10 @@ def format_impact_report(report) -> str:
                 lines.append(f"  why now: {action.why_now}")
             if action.expected_outcome:
                 lines.append(f"  expect: {action.expected_outcome}")
+            if action.follow_if_true:
+                lines.append(f"  if yes: {action.follow_if_true}")
+            if action.follow_if_false:
+                lines.append(f"  if no: {action.follow_if_false}")
             if action.location_hint:
                 lines.append(f"  open {action.location_hint}")
             if action.command_hint:
