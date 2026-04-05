@@ -80,7 +80,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
-- File tracing and impact analysis now understand TS/JS import + re-export chains and Python package boundaries, not just raw same-name references
+- File tracing and impact analysis now understand TS/JS import + re-export chains, including TS sources that import emitted `.js` specifiers, plus Python package boundaries instead of relying only on raw same-name references
 - Repo-local `.repomapper.toml` files can now scope the repository view, mark extra important files, extend framework/test signals, and tune ranking weights without changing the CLI or MCP payload shape
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first

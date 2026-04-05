@@ -47,5 +47,38 @@
         {"line": 1, "name": "api", "kind": "def"}
       ]
     }
+  },
+  {
+    "name": "ts_reexport_js_specifiers_trace",
+    "mode": "trace",
+    "fixture": "evals/fixtures/ts_reexport_js_specifiers",
+    "golden": "evals/goldens/ts_reexport_js_specifiers.trace.json",
+    "files": ["app.ts", "index.ts", "service.ts"],
+    "start_file": "app.ts",
+    "end_file": "service.ts",
+    "tags": {
+      "app.ts": [],
+      "index.ts": [],
+      "service.ts": [
+        {"line": 1, "name": "api", "kind": "def"}
+      ]
+    }
+  },
+  {
+    "name": "ts_reexport_js_specifiers_impact",
+    "mode": "impact",
+    "fixture": "evals/fixtures/ts_reexport_js_specifiers",
+    "golden": "evals/goldens/ts_reexport_js_specifiers.impact.json",
+    "files": ["app.ts", "index.ts", "service.ts"],
+    "seed_files": ["app.ts"],
+    "max_depth": 3,
+    "max_results": 5,
+    "tags": {
+      "app.ts": [],
+      "index.ts": [],
+      "service.ts": [
+        {"line": 1, "name": "api", "kind": "def"}
+      ]
+    }
   }
 ]

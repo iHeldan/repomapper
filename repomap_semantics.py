@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,13 +58,30 @@ def collect_semantic_links(
 
 
 def _normalize_known_path(path: Path) -> str:
-    return path.as_posix().lstrip("./")
+    return os.path.normpath(path.as_posix()).replace("\\", "/").lstrip("./")
+
+
+def _expand_js_ts_suffix_candidates(path: Path) -> List[Path]:
+    """Expand compiled JS specifiers back to plausible source files."""
+    candidates = [path]
+    suffix = path.suffix.lower()
+    if suffix not in JS_TS_EXTENSIONS:
+        return candidates
+
+    stem = path.with_suffix("")
+    for alt_suffix in JS_TS_EXTENSIONS:
+        candidate = Path(f"{stem.as_posix()}{alt_suffix}")
+        if candidate != path:
+            candidates.append(candidate)
+    return candidates
 
 
 def _candidate_symbols(spec: str) -> List[tuple[Optional[str], Optional[str]]]:
     spec = spec.strip()
     if not spec:
         return [(None, None)]
+    if spec.startswith("type "):
+        spec = spec[5:].strip()
 
     pieces: List[tuple[Optional[str], Optional[str]]] = []
     named_match = re.search(r"\{([^}]*)\}", spec)
@@ -117,7 +135,7 @@ def _resolve_js_ts_module(
         base = (parent / spec_path).as_posix()
         base_path = Path(base)
         if base_path.suffix:
-            candidates.append(base_path)
+            candidates.extend(_expand_js_ts_suffix_candidates(base_path))
         else:
             candidates.append(base_path)
             for suffix in JS_TS_EXTENSIONS:
@@ -127,7 +145,7 @@ def _resolve_js_ts_module(
     else:
         base_path = Path(module_spec)
         if base_path.suffix:
-            candidates.append(base_path)
+            candidates.extend(_expand_js_ts_suffix_candidates(base_path))
         else:
             candidates.append(base_path)
             for suffix in JS_TS_EXTENSIONS:
@@ -149,56 +167,61 @@ def _collect_js_ts_semantic_links(
 ) -> List[SemanticLink]:
     links: List[SemanticLink] = []
 
-    import_from_pattern = re.compile(r'^\s*import\s+(.+?)\s+from\s+["\']([^"\']+)["\']\s*;?\s*$')
-    export_from_pattern = re.compile(r'^\s*export\s+(.+?)\s+from\s+["\']([^"\']+)["\']\s*;?\s*$')
+    import_from_pattern = re.compile(
+        r'^\s*import\s+([\s\S]*?)\s+from\s+["\']([^"\']+)["\']\s*;?',
+        re.MULTILINE,
+    )
+    export_from_pattern = re.compile(
+        r'^\s*export\s+([\s\S]*?)\s+from\s+["\']([^"\']+)["\']\s*;?',
+        re.MULTILINE,
+    )
     require_pattern = re.compile(
         r'^\s*(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\(\s*["\']([^"\']+)["\']\s*\)\s*;?\s*$'
     )
 
+    for match in import_from_pattern.finditer(text):
+        symbol_spec, module_spec = match.groups()
+        target = _resolve_js_ts_module(rel_fname, module_spec, known_rel_fnames)
+        if not target:
+            continue
+        line_num = text.count("\n", 0, match.start()) + 1
+        normalized_spec = " ".join(symbol_spec.strip().split())
+        for source_symbol, target_symbol in _candidate_symbols(symbol_spec):
+            detail = f"import {normalized_spec} from {module_spec}"
+            links.append(
+                SemanticLink(
+                    source=rel_fname,
+                    target=target,
+                    relation="imports",
+                    line=line_num,
+                    source_symbol=source_symbol,
+                    target_symbol=target_symbol,
+                    detail=detail,
+                )
+            )
+
+    for match in export_from_pattern.finditer(text):
+        symbol_spec, module_spec = match.groups()
+        target = _resolve_js_ts_module(rel_fname, module_spec, known_rel_fnames)
+        if not target:
+            continue
+        line_num = text.count("\n", 0, match.start()) + 1
+        normalized_spec = " ".join(symbol_spec.strip().split())
+        for source_symbol, target_symbol in _candidate_symbols(symbol_spec):
+            detail = f"export {normalized_spec} from {module_spec}"
+            links.append(
+                SemanticLink(
+                    source=rel_fname,
+                    target=target,
+                    relation="re_exports",
+                    line=line_num,
+                    source_symbol=source_symbol,
+                    target_symbol=target_symbol,
+                    detail=detail,
+                )
+            )
+
     for line_num, line in enumerate(text.splitlines(), start=1):
-        match = import_from_pattern.match(line)
-        if match:
-            symbol_spec, module_spec = match.groups()
-            target = _resolve_js_ts_module(rel_fname, module_spec, known_rel_fnames)
-            if not target:
-                continue
-            for source_symbol, target_symbol in _candidate_symbols(symbol_spec):
-                detail = f"import {symbol_spec.strip()} from {module_spec}"
-                links.append(
-                    SemanticLink(
-                        source=rel_fname,
-                        target=target,
-                        relation="imports",
-                        line=line_num,
-                        source_symbol=source_symbol,
-                        target_symbol=target_symbol,
-                        detail=detail,
-                    )
-                )
-            continue
-
-        match = export_from_pattern.match(line)
-        if match:
-            symbol_spec, module_spec = match.groups()
-            target = _resolve_js_ts_module(rel_fname, module_spec, known_rel_fnames)
-            if not target:
-                continue
-            relation = "re_exports"
-            for source_symbol, target_symbol in _candidate_symbols(symbol_spec):
-                detail = f"export {symbol_spec.strip()} from {module_spec}"
-                links.append(
-                    SemanticLink(
-                        source=rel_fname,
-                        target=target,
-                        relation=relation,
-                        line=line_num,
-                        source_symbol=source_symbol,
-                        target_symbol=target_symbol,
-                        detail=detail,
-                    )
-                )
-            continue
-
         match = require_pattern.match(line)
         if match:
             alias, module_spec = match.groups()

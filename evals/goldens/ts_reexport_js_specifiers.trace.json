@@ -1,0 +1,37 @@
+{
+  "path": [
+    "app.ts",
+    "index.ts",
+    "service.ts"
+  ],
+  "relations": [
+    "imports",
+    "re_exports"
+  ],
+  "symbols": [
+    [
+      "api"
+    ],
+    [
+      "api"
+    ]
+  ],
+  "symbol_path": [
+    {
+      "relation": "imports",
+      "source_file": "app.ts",
+      "target_file": "index.ts",
+      "source_symbol": "api",
+      "target_symbol": "api",
+      "evidence_kind": "import"
+    },
+    {
+      "relation": "re_exports",
+      "source_file": "index.ts",
+      "target_file": "service.ts",
+      "source_symbol": "api",
+      "target_symbol": "api",
+      "evidence_kind": "re_export"
+    }
+  ]
+}

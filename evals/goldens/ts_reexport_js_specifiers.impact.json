@@ -1,0 +1,68 @@
+{
+  "impacted_files": [
+    {
+      "path": "index.ts",
+      "distance": 1,
+      "relations": [
+        "imports"
+      ],
+      "boundary_symbols": [
+        "api"
+      ],
+      "symbol_path": [
+        {
+          "relation": "imports",
+          "source_file": "app.ts",
+          "target_file": "index.ts",
+          "source_symbol": "api",
+          "target_symbol": "api",
+          "evidence_kind": "import"
+        }
+      ]
+    },
+    {
+      "path": "service.ts",
+      "distance": 2,
+      "relations": [
+        "imports",
+        "re_exports"
+      ],
+      "boundary_symbols": [
+        "api"
+      ],
+      "symbol_path": [
+        {
+          "relation": "imports",
+          "source_file": "app.ts",
+          "target_file": "index.ts",
+          "source_symbol": "api",
+          "target_symbol": "api",
+          "evidence_kind": "import"
+        },
+        {
+          "relation": "re_exports",
+          "source_file": "index.ts",
+          "target_file": "service.ts",
+          "source_symbol": "api",
+          "target_symbol": "api",
+          "evidence_kind": "re_export"
+        }
+      ]
+    }
+  ],
+  "quick_actions": [
+    {
+      "kind": "open_direct_neighbor",
+      "target": "index.ts",
+      "target_role": "public_api"
+    }
+  ],
+  "edit_plan": [
+    {
+      "title": "Inspect public API boundary",
+      "target": "index.ts",
+      "target_role": "public_api"
+    }
+  ],
+  "test_clusters": []
+}

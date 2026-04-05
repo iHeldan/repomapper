@@ -474,6 +474,73 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.symbol_path[0].evidence_kind, "import")
             self.assertEqual(report.symbol_path[1].evidence_kind, "re_export")
 
+    def test_trace_file_path_surfaces_typescript_js_specifier_import_and_reexport_chain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.ts"
+            index_file = root / "index.ts"
+            service_file = root / "service.ts"
+            app_file.write_text('import { api } from "./index.js"\n', encoding="utf-8")
+            index_file.write_text('export {\n  api,\n} from "./service.js"\n', encoding="utf-8")
+            service_file.write_text("export const api = () => true\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.ts": [],
+                "index.ts": [],
+                "service.ts": [Tag("service.ts", str(service_file), 1, "api", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.trace_file_path(
+                str(app_file),
+                str(service_file),
+                files=[str(app_file), str(index_file), str(service_file)],
+                max_hops=4,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual(report.path, ["app.ts", "index.ts", "service.ts"])
+            self.assertEqual(report.steps[0].relation, "imports")
+            self.assertEqual(report.steps[0].symbol_hops[0].detail, "import { api } from ./index.js")
+            self.assertEqual(report.steps[1].relation, "re_exports")
+            self.assertEqual(report.steps[1].symbol_hops[0].detail, "export { api, } from ./service.js")
+            self.assertEqual(report.symbol_path[1].target_file, "service.ts")
+
+    def test_trace_file_path_surfaces_parent_relative_typescript_type_reexport_chain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            sdk_dir = root / "sdk"
+            channels_dir = root / "channels"
+            sdk_dir.mkdir()
+            channels_dir.mkdir()
+            index_file = sdk_dir / "index.ts"
+            types_file = channels_dir / "types.ts"
+            index_file.write_text('export type {\n  Api,\n} from "../channels/types.js"\n', encoding="utf-8")
+            types_file.write_text("export type Api = { ok: true }\n", encoding="utf-8")
+
+            tags_by_name = {
+                "index.ts": [],
+                "types.ts": [Tag("channels/types.ts", str(types_file), 1, "Api", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.trace_file_path(
+                str(index_file),
+                str(types_file),
+                files=[str(index_file), str(types_file)],
+                max_hops=3,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual(report.path, ["sdk/index.ts", "channels/types.ts"])
+            self.assertEqual(report.steps[0].relation, "re_exports")
+            self.assertEqual(report.steps[0].symbol_hops[0].detail, "export type { Api, } from ../channels/types.js")
+            self.assertEqual(report.symbol_path[0].target_symbol, "Api")
+
     def test_trace_file_path_surfaces_python_package_boundary_chain(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -811,6 +878,75 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(service_target.symbol_path[1].detail, "export { api } from ./service")
             self.assertEqual(service_target.boundary_symbols, ["api"])
 
+    def test_analyze_file_impact_uses_semantic_reexport_chain_with_js_specifiers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.ts"
+            index_file = root / "index.ts"
+            service_file = root / "service.ts"
+            app_file.write_text('import { api } from "./index.js"\n', encoding="utf-8")
+            index_file.write_text('export {\n  api,\n} from "./service.js"\n', encoding="utf-8")
+            service_file.write_text("export const api = () => true\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.ts": [],
+                "index.ts": [],
+                "service.ts": [Tag("service.ts", str(service_file), 1, "api", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(app_file)],
+                files=[str(app_file), str(index_file), str(service_file)],
+                max_depth=3,
+                max_results=5,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual([entry.path for entry in report.impacted_files], ["index.ts", "service.ts"])
+            service_target = report.impacted_files[1]
+            self.assertEqual(service_target.path_from_seed, ["app.ts", "index.ts", "service.ts"])
+            self.assertEqual(service_target.steps[0].symbol_hops[0].detail, "import { api } from ./index.js")
+            self.assertEqual(service_target.steps[1].symbol_hops[0].detail, "export { api, } from ./service.js")
+            self.assertEqual(service_target.boundary_symbols, ["api"])
+
+    def test_analyze_file_impact_uses_parent_relative_typescript_type_reexport_chain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            sdk_dir = root / "sdk"
+            channels_dir = root / "channels"
+            sdk_dir.mkdir()
+            channels_dir.mkdir()
+            index_file = sdk_dir / "index.ts"
+            types_file = channels_dir / "types.ts"
+            index_file.write_text('export type {\n  Api,\n} from "../channels/types.js"\n', encoding="utf-8")
+            types_file.write_text("export type Api = { ok: true }\n", encoding="utf-8")
+
+            tags_by_name = {
+                "index.ts": [],
+                "types.ts": [Tag("channels/types.ts", str(types_file), 1, "Api", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(index_file)],
+                files=[str(index_file), str(types_file)],
+                max_depth=2,
+                max_results=5,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual([entry.path for entry in report.impacted_files], ["channels/types.ts"])
+            target = report.impacted_files[0]
+            self.assertEqual(target.path_from_seed, ["sdk/index.ts", "channels/types.ts"])
+            self.assertEqual(target.steps[0].relation, "re_exports")
+            self.assertEqual(target.steps[0].symbol_hops[0].detail, "export type { Api, } from ../channels/types.js")
+            self.assertEqual(target.boundary_symbols, ["Api"])
+
     def test_analyze_file_impact_prefers_targets_closer_to_changed_hunks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -1099,8 +1235,8 @@ class EvalRunnerTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         summary = repomap_eval.run_evals(repo_root=repo_root)
 
-        self.assertEqual(summary["total"], 3)
-        self.assertEqual(summary["passed"], 3)
+        self.assertEqual(summary["total"], 5)
+        self.assertEqual(summary["passed"], 5)
         self.assertEqual(summary["failed"], [])
 
 
