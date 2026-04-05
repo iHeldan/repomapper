@@ -133,6 +133,45 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("referenced_by", {reason.code for reason in by_path["c.py"].reasons})
             self.assertEqual(by_path["b.py"].sample_symbols, ["B"])
 
+    def test_query_terms_boost_matching_paths_and_symbols(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            auth_file = root / "auth_service.py"
+            billing_file = root / "billing.py"
+            auth_file.write_text("# auth\n", encoding="utf-8")
+            billing_file.write_text("# billing\n", encoding="utf-8")
+
+            tags_by_name = {
+                "auth_service.py": [
+                    Tag("auth_service.py", str(auth_file), 1, "AuthService", "def"),
+                    Tag("auth_service.py", str(auth_file), 2, "login_user", "def"),
+                ],
+                "billing.py": [
+                    Tag("billing.py", str(billing_file), 1, "BillingService", "def"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            ranked_tags, file_report = repo_map.get_ranked_tags(
+                [],
+                [str(auth_file), str(billing_file)],
+                query="auth login flow",
+            )
+
+            ranks_by_file = {}
+            for rank, tag in ranked_tags:
+                ranks_by_file[tag.rel_fname] = max(rank, ranks_by_file.get(tag.rel_fname, 0))
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertEqual(file_report.query_terms, ["auth", "login", "flow"])
+            self.assertGreater(ranks_by_file["auth_service.py"], ranks_by_file["billing.py"])
+            self.assertEqual(by_path["auth_service.py"].matched_query_path_terms, ["auth"])
+            self.assertEqual(by_path["auth_service.py"].matched_query_symbol_terms, ["auth", "login"])
+            self.assertIn("query_path_match", {reason.code for reason in by_path["auth_service.py"].reasons})
+            self.assertIn("query_symbol_match", {reason.code for reason in by_path["auth_service.py"].reasons})
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
@@ -338,11 +377,14 @@ class CliPathResolutionTests(unittest.TestCase):
             source_file = root / "app.py"
             source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
 
+            captured = {}
             fake_report = FileReport(
                 excluded={},
                 definition_matches=1,
                 reference_matches=0,
                 total_files_considered=1,
+                query="auth login",
+                query_terms=["auth", "login"],
                 ranked_files=[
                     RankedFile(
                         path="app.py",
@@ -350,6 +392,8 @@ class CliPathResolutionTests(unittest.TestCase):
                         base_rank=1.0,
                         included_in_map=True,
                         definitions=1,
+                        matched_query_terms=["auth"],
+                        matched_query_symbol_terms=["auth"],
                         sample_symbols=["foo"],
                         reasons=[RankingReason("definitions", "Defines 1 symbol.")],
                     )
@@ -359,13 +403,14 @@ class CliPathResolutionTests(unittest.TestCase):
             )
 
             def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                captured["query"] = kwargs.get("query")
                 return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", fake_report
 
             with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
                 with mock.patch.object(
                     sys,
                     "argv",
-                    ["repomap.py", "--root", str(root), "--output-format", "json", "app.py"],
+                    ["repomap.py", "--root", str(root), "--output-format", "json", "--query", "auth login", "app.py"],
                 ):
                     stdout = io.StringIO()
                     stderr = io.StringIO()
@@ -373,10 +418,45 @@ class CliPathResolutionTests(unittest.TestCase):
                         repomap.main()
 
             payload = json.loads(stdout.getvalue())
+            self.assertEqual(captured["query"], "auth login")
+            self.assertEqual(payload["report"]["query_terms"], ["auth", "login"])
             self.assertEqual(payload["report"]["selected_files"], ["app.py"])
             self.assertEqual(payload["report"]["ranked_files"][0]["path"], "app.py")
             self.assertEqual(payload["report"]["ranked_files"][0]["reasons"][0]["code"], "definitions")
             self.assertEqual(stderr.getvalue(), "")
+
+
+class RepoMapServerTests(unittest.TestCase):
+    def tearDown(self):
+        repomap_server._REPO_MAP_CACHE.clear()
+
+    def test_repo_map_passes_query_to_repo_mapper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, **kwargs):
+                captured["query"] = kwargs.get("query")
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded={},
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=1,
+                    query=kwargs.get("query"),
+                    query_terms=["auth"],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(source_file)]):
+                    with mock.patch.object(RepoMap, "get_repo_map", new=fake_get_repo_map):
+                        result = asyncio.run(repomap_server.repo_map(str(root), query="auth"))
+
+            self.assertEqual(captured["query"], "auth")
+            self.assertEqual(result["report"]["query"], "auth")
+            self.assertEqual(result["report"]["query_terms"], ["auth"])
 
 
 class GitSupportTests(unittest.TestCase):

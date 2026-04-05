@@ -122,6 +122,11 @@ Examples:
         nargs="*",
         help="Identifiers explicitly mentioned (given higher priority)"
     )
+
+    parser.add_argument(
+        "--query",
+        help="Free-form task or search query used to bias ranking toward relevant paths and symbols"
+    )
     
     parser.add_argument(
         "--verbose",
@@ -273,6 +278,7 @@ Examples:
             other_files=other_files,
             mentioned_fnames=mentioned_fnames,
             mentioned_idents=mentioned_idents,
+            query=args.query,
             force_refresh=args.force_refresh
         )
 

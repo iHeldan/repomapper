@@ -83,6 +83,7 @@ async def repo_map(
     project_root: str,
     chat_files: Optional[List[str]] = None,
     other_files: Optional[List[str]] = None,
+    query: Optional[str] = None,
     token_limit: Any = 8192,  # Accept any type to handle empty strings
     exclude_unranked: bool = False,
     force_refresh: bool = False,
@@ -101,6 +102,7 @@ async def repo_map(
     :param project_root: Root directory of the project to search.  (must be an absolute path!)
     :param chat_files: A list of file paths that are currently in the chat context. These files will receive the highest ranking.
     :param other_files: A list of other relevant file paths in the repository to consider for the map. They receive a lower ranking boost than mentioned_files and chat_files.
+    :param query: Optional free-form task/query string used to bias ranking toward matching paths and symbols.
     :param token_limit: The maximum number of tokens the generated repository map should occupy. Defaults to 8192.
     :param exclude_unranked: If True, files with a PageRank of 0.0 will be excluded from the map. Defaults to False.
     :param force_refresh: If True, forces a refresh of the repository map cache. Defaults to False.
@@ -118,6 +120,8 @@ async def repo_map(
             - 'definition_matches': count of matched definitions
             - 'reference_matches': count of matched references
             - 'total_files_considered': total files processed
+            - 'query' / 'query_terms': task query context used for ranking, when provided
+            - 'ranked_files': per-file rank metadata and reason codes
         Or an 'error' key if an error occurred.
     """
     if error := _check_project_root(project_root):
@@ -190,6 +194,7 @@ async def repo_map(
             other_files=abs_other,
             mentioned_fnames=mentioned_fnames_set,
             mentioned_idents=mentioned_idents_set,
+            query=query,
             force_refresh=force_refresh
         )
 

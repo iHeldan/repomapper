@@ -52,6 +52,9 @@ class RankedFile:
     references: int = 0
     referenced_by_files: int = 0
     references_to_files: int = 0
+    matched_query_terms: List[str] = field(default_factory=list)
+    matched_query_path_terms: List[str] = field(default_factory=list)
+    matched_query_symbol_terms: List[str] = field(default_factory=list)
     mentioned_identifiers: List[str] = field(default_factory=list)
     sample_symbols: List[str] = field(default_factory=list)
     inbound_neighbors: List[str] = field(default_factory=list)
@@ -67,6 +70,8 @@ class FileReport:
     reference_matches: int          # Total reference tags
     total_files_considered: int     # Total files provided as input
     diagnostics: List[str] = field(default_factory=list)
+    query: Optional[str] = None
+    query_terms: List[str] = field(default_factory=list)
     ranked_files: List[RankedFile] = field(default_factory=list)
     selected_files: List[str] = field(default_factory=list)
     map_tokens: int = 0
@@ -78,6 +83,11 @@ CACHE_VERSION = 1
 
 TAGS_CACHE_DIR = f".repomap.tags.cache.v{CACHE_VERSION}"
 SQLITE_ERRORS = (sqlite3.OperationalError, sqlite3.DatabaseError)
+QUERY_STOP_WORDS = {
+    "a", "an", "and", "are", "for", "from", "how", "into", "its", "that",
+    "the", "their", "this", "those", "was", "what", "when", "where", "which",
+    "with",
+}
 
 # Tag namedtuple for storing parsed code definitions and references
 Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
@@ -267,6 +277,7 @@ class RepoMap:
         mentioned_fnames: Set[str],
         mentioned_idents: Set[str],
         chat_rel_fnames: Set[str],
+        query_boost: float = 1.0,
     ) -> float:
         """Apply the standard rank boosts for a file/tag pair."""
         boost = 1.0
@@ -276,6 +287,7 @@ class RepoMap:
             boost *= 5.0
         if rel_fname in chat_rel_fnames:
             boost *= 20.0
+        boost *= query_boost
         return file_rank * boost
 
     @staticmethod
@@ -290,6 +302,55 @@ class RepoMap:
             unique_values.append(value)
         return unique_values
 
+    def _extract_query_terms(self, query: Optional[str]) -> List[str]:
+        """Extract code-relevant terms from a free-form query string."""
+        if not query:
+            return []
+
+        terms = []
+        for token in re.split(r"[^A-Za-z0-9]+", query.lower()):
+            if len(token) < 2 or token in QUERY_STOP_WORDS:
+                continue
+            terms.append(token)
+        return self._dedupe_preserve_order(terms)
+
+    def _match_query_terms(
+        self,
+        rel_fname: str,
+        tags: List[Tag],
+        query_terms: List[str],
+    ) -> Tuple[List[str], List[str]]:
+        """Find query terms that match the file path or extracted symbols."""
+        if not query_terms:
+            return [], []
+
+        rel_lower = rel_fname.lower()
+        path_matches = [term for term in query_terms if term in rel_lower]
+
+        symbol_names = {tag.name.lower() for tag in tags if tag.name}
+        symbol_matches = []
+        for term in query_terms:
+            if any(term in symbol_name for symbol_name in symbol_names):
+                symbol_matches.append(term)
+
+        return self._dedupe_preserve_order(path_matches), self._dedupe_preserve_order(symbol_matches)
+
+    def _get_query_rank_context(
+        self,
+        file_rank: float,
+        path_matches: List[str],
+        symbol_matches: List[str],
+    ) -> Tuple[float, float]:
+        """Return an effective base rank and boost for query-matched files."""
+        if not path_matches and not symbol_matches:
+            return file_rank, 1.0
+
+        query_floor = (0.02 * len(path_matches)) + (0.05 * len(symbol_matches))
+        path_boost = 1.0 + (0.75 * len(path_matches))
+        symbol_boost = 1.0 + (1.25 * len(symbol_matches))
+        query_boost = min(path_boost * symbol_boost, 8.0)
+        return max(file_rank, query_floor), query_boost
+
     def _build_file_reasons(
         self,
         *,
@@ -297,6 +358,8 @@ class RepoMap:
         is_chat_file: bool,
         is_mentioned_file: bool,
         is_important_file: bool,
+        matched_query_path_terms: List[str],
+        matched_query_symbol_terms: List[str],
         mentioned_identifiers: List[str],
         inbound_neighbors: List[str],
         outbound_neighbors: List[str],
@@ -310,6 +373,20 @@ class RepoMap:
             reasons.append(RankingReason("chat_file", "File is part of the active chat/edit context."))
         if is_mentioned_file:
             reasons.append(RankingReason("mentioned_file", "File was explicitly mentioned by the caller."))
+        if matched_query_path_terms:
+            reasons.append(
+                RankingReason(
+                    "query_path_match",
+                    f"Path matches query terms: {', '.join(matched_query_path_terms[:4])}.",
+                )
+            )
+        if matched_query_symbol_terms:
+            reasons.append(
+                RankingReason(
+                    "query_symbol_match",
+                    f"Symbol names match query terms: {', '.join(matched_query_symbol_terms[:4])}.",
+                )
+            )
         if mentioned_identifiers:
             preview = ", ".join(mentioned_identifiers[:3])
             if len(mentioned_identifiers) > 3:
@@ -563,17 +640,19 @@ class RepoMap:
         chat_fnames: List[str],
         other_fnames: List[str],
         mentioned_fnames: Optional[Set[str]] = None,
-        mentioned_idents: Optional[Set[str]] = None
+        mentioned_idents: Optional[Set[str]] = None,
+        query: Optional[str] = None,
     ) -> Tuple[List[Tuple[float, Tag]], FileReport]:
         """Get ranked tags using PageRank algorithm with file report."""
         # Return empty list and empty report if no files
         if not chat_fnames and not other_fnames:
-            return [], FileReport({}, 0, 0, 0, [])
+            return [], FileReport({}, 0, 0, 0, query=query, query_terms=self._extract_query_terms(query))
             
         if mentioned_fnames is None:
             mentioned_fnames = set()
         if mentioned_idents is None:
             mentioned_idents = set()
+        query_terms = self._extract_query_terms(query)
 
         chat_fnames = [os.path.abspath(f) for f in chat_fnames]
         other_fnames = [os.path.abspath(f) for f in other_fnames]
@@ -586,6 +665,8 @@ class RepoMap:
         supplemental_tags_by_file: Dict[str, List[Tag]] = {}
         definitions_by_file: Dict[str, List[str]] = defaultdict(list)
         references_by_file: Dict[str, List[str]] = defaultdict(list)
+        query_path_matches_by_file: Dict[str, List[str]] = {}
+        query_symbol_matches_by_file: Dict[str, List[str]] = {}
         mentioned_identifiers_by_file: Dict[str, Set[str]] = defaultdict(set)
 
         defines = defaultdict(set)
@@ -634,6 +715,14 @@ class RepoMap:
                 synthetic_tags = self._get_important_file_tags(fname, rel_fname)
                 if synthetic_tags:
                     supplemental_tags_by_file[fname] = synthetic_tags
+
+            path_matches, symbol_matches = self._match_query_terms(
+                rel_fname,
+                tags + supplemental_tags_by_file.get(fname, []),
+                query_terms,
+            )
+            query_path_matches_by_file[rel_fname] = path_matches
+            query_symbol_matches_by_file[rel_fname] = symbol_matches
             
             # Set personalization for chat files
             if fname in chat_fnames_set:
@@ -658,7 +747,15 @@ class RepoMap:
         G.add_edges_from(edges_to_add)
         
         if not G.nodes():
-            return [], FileReport(excluded, total_definitions, total_references, len(all_fnames), list(self.diagnostics))
+            return [], FileReport(
+                excluded,
+                total_definitions,
+                total_references,
+                len(all_fnames),
+                list(self.diagnostics),
+                query=query,
+                query_terms=query_terms,
+            )
         
         # Run PageRank
         try:
@@ -678,6 +775,8 @@ class RepoMap:
             reference_matches=total_references,
             total_files_considered=len(all_fnames),
             diagnostics=list(self.diagnostics),
+            query=query,
+            query_terms=query_terms,
         )
         
         # Collect and rank tags
@@ -687,9 +786,16 @@ class RepoMap:
         for fname in included:
             rel_fname = abs_to_rel[fname]
             file_rank = ranks.get(rel_fname, 0.0)
+            query_path_matches = query_path_matches_by_file.get(rel_fname, [])
+            query_symbol_matches = query_symbol_matches_by_file.get(rel_fname, [])
+            effective_file_rank, query_boost = self._get_query_rank_context(
+                file_rank,
+                query_path_matches,
+                query_symbol_matches,
+            )
 
             # Exclude files with low Page Rank if exclude_unranked is True
-            if self.exclude_unranked and file_rank <= 0.0001 and fname not in supplemental_tags_by_file:
+            if self.exclude_unranked and effective_file_rank <= 0.0001 and fname not in supplemental_tags_by_file:
                 continue
             
             tags = tags_by_file.get(fname, [])
@@ -698,10 +804,11 @@ class RepoMap:
                     final_rank = self._score_file_tag(
                         rel_fname,
                         tag.name,
-                        file_rank,
+                        effective_file_rank,
                         mentioned_fnames,
                         mentioned_idents,
                         chat_rel_fnames,
+                        query_boost,
                     )
                     ranked_tags.append((final_rank, tag))
                     max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
@@ -710,10 +817,11 @@ class RepoMap:
                 final_rank = self._score_file_tag(
                     rel_fname,
                     tag.name,
-                    max(file_rank * 4.0, 0.02),
+                    max(effective_file_rank * 4.0, 0.02),
                     mentioned_fnames,
                     mentioned_idents,
                     chat_rel_fnames,
+                    query_boost,
                 )
                 ranked_tags.append((final_rank, tag))
                 max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
@@ -733,6 +841,8 @@ class RepoMap:
             outbound_neighbors = sorted(G.successors(rel_fname))
             definition_names = self._dedupe_preserve_order(definitions_by_file.get(rel_fname, []))
             reference_names = self._dedupe_preserve_order(references_by_file.get(rel_fname, []))
+            matched_query_path_terms = query_path_matches_by_file.get(rel_fname, [])
+            matched_query_symbol_terms = query_symbol_matches_by_file.get(rel_fname, [])
             mentioned_identifiers = sorted(mentioned_identifiers_by_file.get(rel_fname, set()))
             lines_of_interest = sorted({
                 tag.line
@@ -755,6 +865,11 @@ class RepoMap:
                     references=len(references_by_file.get(rel_fname, [])),
                     referenced_by_files=len(inbound_neighbors),
                     references_to_files=len(outbound_neighbors),
+                    matched_query_terms=self._dedupe_preserve_order(
+                        matched_query_path_terms + matched_query_symbol_terms
+                    ),
+                    matched_query_path_terms=matched_query_path_terms,
+                    matched_query_symbol_terms=matched_query_symbol_terms,
                     mentioned_identifiers=mentioned_identifiers,
                     sample_symbols=(definition_names or reference_names)[:5],
                     inbound_neighbors=inbound_neighbors[:5],
@@ -765,6 +880,8 @@ class RepoMap:
                         is_chat_file=fname in chat_fnames_set,
                         is_mentioned_file=rel_fname in mentioned_fnames,
                         is_important_file=bool(supplemental_tags),
+                        matched_query_path_terms=matched_query_path_terms,
+                        matched_query_symbol_terms=matched_query_symbol_terms,
                         mentioned_identifiers=mentioned_identifiers,
                         inbound_neighbors=inbound_neighbors,
                         outbound_neighbors=outbound_neighbors,
@@ -859,6 +976,7 @@ class RepoMap:
         max_map_tokens: int,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        query: Optional[str] = None,
         force_refresh: bool = False
     ) -> Tuple[Optional[str], FileReport]:
         """Get the ranked tags map with caching."""
@@ -868,6 +986,7 @@ class RepoMap:
             max_map_tokens,
             tuple(sorted(mentioned_fnames or [])),
             tuple(sorted(mentioned_idents or [])),
+            query or "",
         )
         
         if not force_refresh and cache_key in self.map_cache:
@@ -875,7 +994,7 @@ class RepoMap:
         
         result = self.get_ranked_tags_map_uncached(
             chat_fnames, other_fnames, max_map_tokens,
-            mentioned_fnames, mentioned_idents
+            mentioned_fnames, mentioned_idents, query
         )
         
         self.map_cache[cache_key] = result
@@ -887,11 +1006,12 @@ class RepoMap:
         other_fnames: List[str],
         max_map_tokens: int,
         mentioned_fnames: Optional[Set[str]] = None,
-        mentioned_idents: Optional[Set[str]] = None
+        mentioned_idents: Optional[Set[str]] = None,
+        query: Optional[str] = None,
     ) -> Tuple[Optional[str], FileReport]:
         """Generate the ranked tags map without caching."""
         ranked_tags, file_report = self.get_ranked_tags(
-            chat_fnames, other_fnames, mentioned_fnames, mentioned_idents
+            chat_fnames, other_fnames, mentioned_fnames, mentioned_idents, query
         )
         
         if not ranked_tags:
@@ -958,6 +1078,7 @@ class RepoMap:
         other_files: List[str] = None,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
+        query: Optional[str] = None,
         force_refresh: bool = False
     ) -> Tuple[Optional[str], FileReport]:
         """Generate the repository map with file report."""
@@ -971,7 +1092,7 @@ class RepoMap:
         self._uncacheable_tag_failures = set()
             
         # Create empty report for error cases
-        empty_report = FileReport({}, 0, 0, 0, [])
+        empty_report = FileReport({}, 0, 0, 0, query=query, query_terms=self._extract_query_terms(query))
         
         if self.max_map_tokens <= 0 or not other_files:
             return None, empty_report
@@ -990,14 +1111,22 @@ class RepoMap:
             # get_ranked_tags_map returns (map_string, file_report)
             map_string, file_report = self.get_ranked_tags_map(
                 chat_files, other_files, max_map_tokens,
-                mentioned_fnames, mentioned_idents, force_refresh
+                mentioned_fnames, mentioned_idents, query, force_refresh
             )
         except RecursionError:
             message = "Disabling repo map, git repo too large?"
             self._add_diagnostic(message)
             self.output_handlers['error'](message)
             self.max_map_tokens = 0
-            return None, FileReport({}, 0, 0, 0, list(self.diagnostics))  # Ensure consistent return type
+            return None, FileReport(
+                {},
+                0,
+                0,
+                0,
+                list(self.diagnostics),
+                query=query,
+                query_terms=self._extract_query_terms(query),
+            )  # Ensure consistent return type
         
         if map_string is None:
             return None, file_report
