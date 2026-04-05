@@ -66,6 +66,36 @@ def report_parser_warmup(result, info_handler, warning_handler) -> bool:
     return not result.missing
 
 
+def format_connection_report(report) -> str:
+    """Render a connection path report as readable text."""
+    if report.error:
+        lines = [f"No path found: {report.error}"]
+        if report.diagnostics:
+            lines.append("")
+            lines.append("Diagnostics:")
+            lines.extend(f"- {message}" for message in report.diagnostics)
+        return "\n".join(lines)
+
+    lines = [
+        f"Connection path: {report.start_file} -> {report.end_file}",
+        f"Hops: {max(0, len(report.path) - 1)}",
+        "",
+        "Path:",
+    ]
+    lines.extend(f"- {path}" for path in report.path)
+    if report.steps:
+        lines.append("")
+        lines.append("Steps:")
+        for step in report.steps:
+            symbol_suffix = f" via {', '.join(step.symbols[:4])}" if step.symbols else ""
+            lines.append(f"- {step.source} --{step.relation}{symbol_suffix}--> {step.target}")
+    if report.diagnostics:
+        lines.append("")
+        lines.append("Diagnostics:")
+        lines.extend(f"- {message}" for message in report.diagnostics)
+    return "\n".join(lines)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -126,6 +156,23 @@ Examples:
     parser.add_argument(
         "--query",
         help="Free-form task or search query used to bias ranking toward relevant paths and symbols"
+    )
+
+    parser.add_argument(
+        "--trace-from",
+        help="Find a file-level connection path starting from this file"
+    )
+
+    parser.add_argument(
+        "--trace-to",
+        help="Find a file-level connection path ending at this file"
+    )
+
+    parser.add_argument(
+        "--trace-max-hops",
+        type=int,
+        default=6,
+        help="Maximum allowed hop count when tracing file connections (default: 6)"
     )
     
     parser.add_argument(
@@ -230,6 +277,12 @@ Examples:
     # Expand relative path specs against the repository root before collecting files.
     chat_files = [str(resolve_repo_path(root_path, f).resolve()) for f in chat_files_from_args]
     other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
+    trace_from = str(resolve_repo_path(root_path, args.trace_from).resolve()) if args.trace_from else None
+    trace_to = str(resolve_repo_path(root_path, args.trace_to).resolve()) if args.trace_to else None
+
+    if bool(trace_from) != bool(trace_to):
+        tool_error("Both --trace-from and --trace-to must be provided together.")
+        sys.exit(1)
 
     changed_files = []
 
@@ -256,7 +309,7 @@ Examples:
                     f"Including repository neighbors up to distance {args.changed_neighbors} around changed files."
                 )
 
-    inferred_parser_languages = infer_parser_languages(chat_files + other_files)
+    inferred_parser_languages = infer_parser_languages(chat_files + other_files + [path for path in (trace_from, trace_to) if path])
 
     if args.warm_languages:
         requested_languages = inferred_parser_languages if args.warm_languages == ["auto"] else args.warm_languages
@@ -291,6 +344,23 @@ Examples:
     
     # Generate the map
     try:
+        if trace_from and trace_to:
+            connection_report = repo_map.trace_file_path(
+                trace_from,
+                trace_to,
+                files=other_files,
+                max_hops=args.trace_max_hops,
+            )
+
+            if args.output_format == "json":
+                print(json.dumps(dataclasses.asdict(connection_report), indent=2))
+            else:
+                print(format_connection_report(connection_report))
+
+            if connection_report.error:
+                sys.exit(1)
+            return
+
         map_content, file_report = repo_map.get_repo_map(
             chat_files=chat_files,
             other_files=other_files,

@@ -378,6 +378,44 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("neighbor.py:", map_content)
             self.assertNotIn("unrelated.py:", map_content)
 
+    def test_trace_file_path_finds_symbol_and_test_edges(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            test_file = test_dir / "test_service.py"
+            for path in (app_file, service_file, test_file):
+                path.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [
+                    Tag("app.py", str(app_file), 1, "run_app", "def"),
+                    Tag("app.py", str(app_file), 2, "Service", "ref"),
+                ],
+                "service.py": [
+                    Tag("service.py", str(service_file), 1, "Service", "def"),
+                ],
+                "test_service.py": [],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.trace_file_path(
+                str(app_file),
+                str(test_file),
+                files=[str(app_file), str(service_file), str(test_file)],
+                max_hops=4,
+            )
+
+            self.assertIsNone(report.error)
+            self.assertEqual(report.path, ["app.py", "service.py", "tests/test_service.py"])
+            self.assertEqual(report.steps[0].relation, "references")
+            self.assertEqual(report.steps[0].symbols, ["Service"])
+            self.assertEqual(report.steps[1].relation, "related_test")
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
@@ -666,6 +704,56 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["report"]["ranked_files"][0]["reasons"][0]["code"], "definitions")
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_cli_trace_mode_can_emit_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("value = 1\n", encoding="utf-8")
+            service_file.write_text("value = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_trace_file_path(self, start_file, end_file, files=None, max_hops=6):
+                captured["start_file"] = start_file
+                captured["end_file"] = end_file
+                captured["files"] = files
+                captured["max_hops"] = max_hops
+                return repomap_class.ConnectionReport(
+                    start_file="app.py",
+                    end_file="service.py",
+                    path=["app.py", "service.py"],
+                    steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                )
+
+            with mock.patch.object(repomap.RepoMap, "trace_file_path", new=fake_trace_file_path):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "repomap.py",
+                        "--root",
+                        str(root),
+                        "--trace-from",
+                        "app.py",
+                        "--trace-to",
+                        "service.py",
+                        "--output-format",
+                        "json",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(Path(captured["start_file"]).name, "app.py")
+            self.assertEqual(Path(captured["end_file"]).name, "service.py")
+            self.assertEqual(payload["path"], ["app.py", "service.py"])
+            self.assertEqual(payload["steps"][0]["relation"], "references")
+            self.assertEqual(stderr.getvalue(), "")
+
 
 class RepoMapServerTests(unittest.TestCase):
     def tearDown(self):
@@ -731,6 +819,39 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(captured["changed_neighbor_depth"], 1)
             self.assertEqual(result["report"]["changed_files"], ["changed.py"])
             self.assertEqual(result["report"]["changed_neighbor_depth"], 1)
+
+    def test_trace_file_path_tool_returns_serialized_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("value = 1\n", encoding="utf-8")
+            service_file.write_text("value = 2\n", encoding="utf-8")
+
+            def fake_trace_file_path(self, start_file, end_file, files=None, max_hops=6):
+                return repomap_class.ConnectionReport(
+                    start_file="app.py",
+                    end_file="service.py",
+                    path=["app.py", "service.py"],
+                    steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                    diagnostics=["Found a 1-hop path."],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(app_file), str(service_file)]):
+                    with mock.patch.object(RepoMap, "trace_file_path", new=fake_trace_file_path):
+                        result = asyncio.run(
+                            repomap_server.trace_file_path(
+                                str(root),
+                                "app.py",
+                                "service.py",
+                                max_hops=4,
+                            )
+                        )
+
+            self.assertEqual(result["path"], ["app.py", "service.py"])
+            self.assertEqual(result["steps"][0]["relation"], "references")
+            self.assertEqual(result["diagnostics"], ["Found a 1-hop path."])
 
 
 class GitSupportTests(unittest.TestCase):

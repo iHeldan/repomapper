@@ -6,7 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, deque
 from typing import List, Dict, Set, Optional, Tuple, Callable
 import shutil
 import sqlite3
@@ -15,7 +15,7 @@ import diskcache
 import networkx as nx
 from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
 from grep_ast import TreeContext
-from utils import count_tokens, read_text
+from utils import count_tokens, read_text, find_src_files
 from scm import get_scm_fname
 from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
@@ -95,6 +95,24 @@ class FileReport:
     ranked_files: List[RankedFile] = field(default_factory=list)
     selected_files: List[str] = field(default_factory=list)
     map_tokens: int = 0
+
+
+@dataclass
+class ConnectionStep:
+    source: str
+    target: str
+    relation: str
+    symbols: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ConnectionReport:
+    start_file: str
+    end_file: str
+    path: List[str] = field(default_factory=list)
+    steps: List[ConnectionStep] = field(default_factory=list)
+    diagnostics: List[str] = field(default_factory=list)
+    error: Optional[str] = None
 
 
 
@@ -745,6 +763,161 @@ class RepoMap:
             return "config", self._extract_requirements_summary(text)
 
         return None, []
+
+    def _build_file_reference_graph(
+        self,
+        fnames: List[str],
+    ) -> Tuple[Dict[str, str], nx.DiGraph, Dict[Tuple[str, str], List[str]]]:
+        """Build a file-level reference graph and edge labels from parser tags."""
+        all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in fnames))
+        abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
+        known_rel_fnames = set(abs_to_rel.values())
+        defines = defaultdict(set)
+        references = defaultdict(set)
+        edge_symbols = defaultdict(set)
+
+        for fname in all_fnames:
+            rel_fname = abs_to_rel[fname]
+            if not os.path.exists(fname):
+                continue
+
+            tags = self.get_tags(fname, rel_fname)
+            if self._tag_failures.get(fname):
+                continue
+
+            for tag in tags:
+                if tag.kind == "def":
+                    defines[tag.name].add(rel_fname)
+                elif tag.kind == "ref":
+                    references[tag.name].add(rel_fname)
+
+        graph = nx.DiGraph()
+        graph.add_nodes_from(abs_to_rel.values())
+
+        for name, ref_fnames in references.items():
+            def_fnames = defines.get(name, set())
+            if len(ref_fnames) * len(def_fnames) > 1000:
+                continue
+            for ref_fname in ref_fnames:
+                for def_fname in def_fnames:
+                    if ref_fname == def_fname:
+                        continue
+                    graph.add_edge(ref_fname, def_fname)
+                    edge_symbols[(ref_fname, def_fname)].add(name)
+
+        for rel_fname in known_rel_fnames:
+            if self._is_test_file(rel_fname):
+                continue
+            for test_rel_fname in self._find_related_test_files(rel_fname, known_rel_fnames):
+                graph.add_edge(rel_fname, test_rel_fname)
+                graph.add_edge(test_rel_fname, rel_fname)
+                edge_symbols[(rel_fname, test_rel_fname)].add("__related_test__")
+                edge_symbols[(test_rel_fname, rel_fname)].add("__related_source__")
+
+        return abs_to_rel, graph, {
+            pair: sorted(symbols)
+            for pair, symbols in edge_symbols.items()
+        }
+
+    def trace_file_path(
+        self,
+        start_file: str,
+        end_file: str,
+        files: Optional[List[str]] = None,
+        max_hops: int = 6,
+    ) -> ConnectionReport:
+        """Find a shortest file-level path between two files using the repo graph."""
+        self.diagnostics = []
+        self._tag_failures = {}
+        self._uncacheable_tag_failures = set()
+
+        candidate_files = files or find_src_files(str(self.root))
+        all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in candidate_files))
+        abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
+
+        start_abs = os.path.abspath(start_file)
+        end_abs = os.path.abspath(end_file)
+        start_rel = abs_to_rel.get(start_abs, self.get_rel_fname(start_abs))
+        end_rel = abs_to_rel.get(end_abs, self.get_rel_fname(end_abs))
+
+        if start_abs not in abs_to_rel:
+            return ConnectionReport(
+                start_file=start_rel,
+                end_file=end_rel,
+                diagnostics=list(self.diagnostics),
+                error=f"Start file is not in the selected repository scope: {start_rel}",
+            )
+        if end_abs not in abs_to_rel:
+            return ConnectionReport(
+                start_file=start_rel,
+                end_file=end_rel,
+                diagnostics=list(self.diagnostics),
+                error=f"End file is not in the selected repository scope: {end_rel}",
+            )
+
+        _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        undirected_graph = graph.to_undirected()
+
+        if start_rel not in undirected_graph or end_rel not in undirected_graph:
+            return ConnectionReport(
+                start_file=start_rel,
+                end_file=end_rel,
+                diagnostics=list(self.diagnostics),
+                error="One or both files could not be added to the repository graph.",
+            )
+
+        try:
+            path = nx.shortest_path(undirected_graph, start_rel, end_rel)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return ConnectionReport(
+                start_file=start_rel,
+                end_file=end_rel,
+                diagnostics=list(self.diagnostics),
+                error=f"No file-level path found between {start_rel} and {end_rel}.",
+            )
+
+        hop_count = max(0, len(path) - 1)
+        if hop_count > max_hops:
+            return ConnectionReport(
+                start_file=start_rel,
+                end_file=end_rel,
+                path=path,
+                diagnostics=list(self.diagnostics),
+                error=f"Shortest path is {hop_count} hops, which exceeds the max_hops limit of {max_hops}.",
+            )
+
+        steps = []
+        for source, target in zip(path, path[1:]):
+            if graph.has_edge(source, target):
+                symbols = edge_symbols.get((source, target), [])
+                relation = "references"
+            elif graph.has_edge(target, source):
+                symbols = edge_symbols.get((target, source), [])
+                relation = "referenced_by"
+            else:
+                symbols = []
+                relation = "related"
+
+            if "__related_test__" in symbols:
+                relation = "related_test"
+                symbols = []
+            elif "__related_source__" in symbols:
+                relation = "related_source"
+                symbols = []
+
+            steps.append(ConnectionStep(source=source, target=target, relation=relation, symbols=symbols[:5]))
+
+        diagnostics = list(self.diagnostics)
+        if hop_count:
+            diagnostics.append(f"Found a {hop_count}-hop path between {start_rel} and {end_rel}.")
+
+        return ConnectionReport(
+            start_file=start_rel,
+            end_file=end_rel,
+            path=path,
+            steps=steps,
+            diagnostics=diagnostics,
+        )
 
     def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic lines of interest for test files lacking parser definitions."""

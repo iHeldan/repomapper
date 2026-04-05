@@ -15,7 +15,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 7. **Elevates** entrypoints and public API surfaces so agents can find where execution starts
 8. **Expands** git-changed views with nearby impact neighbors when needed
 9. **Extracts** lightweight summaries from key docs and config files
-10. **Compresses** the output to fit within a token budget (default 8192 tokens)
+10. **Traces** shortest file-level connection paths across the repository graph
+11. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -76,6 +77,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Entrypoints and public API files get automatic heuristic boosts and synthetic highlights, with `entrypoint_file` / `public_api_file` reasons in the report
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
+- File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
 
 ## Supported languages
 
@@ -135,6 +137,9 @@ repomap --root /path/to/project --changed-neighbors 1
 # Bias ranking toward a task like auth debugging or payment flow tracing
 repomap --root /path/to/project --query "auth login flow"
 
+# Trace a file-level path between two parts of the repo
+repomap --root /path/to/project --trace-from app.py --trace-to api/routes.py
+
 # Download missing parser runtimes before mapping
 repomap --root /path/to/project --download-missing-parsers
 
@@ -155,6 +160,11 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 - `summary_kind` / `summary_items`: lightweight structured highlights extracted from important docs and config files
 - `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
 - `map_tokens`: estimated token cost of the rendered map
+
+When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mode and returns either:
+
+- a readable hop-by-hop explanation in text mode
+- or a structured `path` + `steps` payload in JSON mode
 
 ### MCP Server
 
@@ -181,6 +191,7 @@ For change-focused workflows, pass `changed_only=true` and optionally `base_ref=
 For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include nearby graph neighbors around those changed files.
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
+The server also exposes `trace_file_path` for shortest-path explanations between two files.
 
 ## Dependencies
 
