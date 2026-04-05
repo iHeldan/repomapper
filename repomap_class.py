@@ -122,6 +122,8 @@ class ImpactTarget:
     distance: int
     path_from_seed: List[str] = field(default_factory=list)
     steps: List[ConnectionStep] = field(default_factory=list)
+    seed_focus_lines: List[int] = field(default_factory=list)
+    changed_boundary_symbols: List[str] = field(default_factory=list)
     boundary_symbols: List[str] = field(default_factory=list)
     boundary_relations: List[str] = field(default_factory=list)
     boundary_locations: List["ImpactLocation"] = field(default_factory=list)
@@ -160,6 +162,7 @@ class ImpactSymbol:
     seed_files: List[str] = field(default_factory=list)
     target_count: int = 0
     closest_distance: Optional[int] = None
+    is_changed_seed_symbol: bool = False
     locations: List[ImpactLocation] = field(default_factory=list)
 
 
@@ -169,6 +172,8 @@ class ImpactReport:
     max_depth: int
     max_results: int
     impacted_files: List[ImpactTarget] = field(default_factory=list)
+    changed_lines_by_file: Dict[str, List[int]] = field(default_factory=dict)
+    changed_seed_symbols: Dict[str, List[str]] = field(default_factory=dict)
     shared_symbols: List[ImpactSymbol] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
@@ -1004,6 +1009,37 @@ class RepoMap:
                 )
         return locations[:12]
 
+    def _extract_changed_symbols(
+        self,
+        tags: List[Tag],
+        changed_lines: List[int],
+    ) -> List[str]:
+        """Infer which symbols are closest to the actually changed lines in a seed file."""
+        if not tags or not changed_lines:
+            return []
+
+        candidate_tags = [tag for tag in tags if tag.kind in {"def", "ref"}]
+        if not candidate_tags:
+            return []
+
+        changed_lines = sorted(set(changed_lines))
+
+        def collect_within(distance_limit: int) -> List[str]:
+            symbols = []
+            for tag in candidate_tags:
+                if min(abs(tag.line - line) for line in changed_lines) > distance_limit:
+                    continue
+                if tag.name not in symbols:
+                    symbols.append(tag.name)
+            return symbols
+
+        symbols = collect_within(0)
+        if not symbols:
+            symbols = collect_within(2)
+        if not symbols:
+            symbols = collect_within(8)
+        return symbols[:8]
+
     def _build_connection_steps(
         self,
         path: List[str],
@@ -1039,6 +1075,7 @@ class RepoMap:
         files: Optional[List[str]] = None,
         max_depth: int = 2,
         max_results: int = 10,
+        changed_lines_by_file: Optional[Dict[str, List[int]]] = None,
     ) -> ImpactReport:
         """Find nearby repository files most likely to be affected by the given seed files."""
         self.diagnostics = []
@@ -1067,6 +1104,17 @@ class RepoMap:
         all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in candidate_files))
         abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
         rel_to_abs = {rel_fname: fname for fname, rel_fname in abs_to_rel.items()}
+        changed_lines_by_rel = {}
+        for fname, line_numbers in (changed_lines_by_file or {}).items():
+            abs_fname = os.path.abspath(fname)
+            rel_fname = abs_to_rel.get(abs_fname)
+            if not rel_fname or not line_numbers:
+                continue
+            changed_lines_by_rel[rel_fname] = sorted(set(int(line) for line in line_numbers if int(line) > 0))
+        report.changed_lines_by_file = {
+            rel_fname: line_numbers[:20]
+            for rel_fname, line_numbers in changed_lines_by_rel.items()
+        }
 
         seed_abs_files = [os.path.abspath(seed_file) for seed_file in seed_files]
         missing_seed_files = [
@@ -1100,6 +1148,19 @@ class RepoMap:
 
         candidate_targets = {}
         seed_rel_set = set(seed_rel_files)
+        changed_seed_symbols_by_rel = {
+            rel_fname: self._extract_changed_symbols(
+                tags_by_rel_fname.get(rel_fname, []),
+                changed_lines_by_rel.get(rel_fname, []),
+            )
+            for rel_fname in seed_rel_files
+            if changed_lines_by_rel.get(rel_fname)
+        }
+        report.changed_seed_symbols = {
+            rel_fname: symbols
+            for rel_fname, symbols in changed_seed_symbols_by_rel.items()
+            if symbols
+        }
         for seed_rel in seed_rel_files:
             try:
                 seed_paths = nx.single_source_shortest_path(
@@ -1126,7 +1187,13 @@ class RepoMap:
                 continue
 
             steps = self._build_connection_steps(path, graph, edge_symbols)
+            seed_focus_lines = changed_lines_by_rel.get(seed_rel, [])
+            changed_seed_symbols = changed_seed_symbols_by_rel.get(seed_rel, [])
             boundary_symbols = self._extract_boundary_symbols(steps)
+            changed_boundary_symbols = [
+                symbol for symbol in boundary_symbols
+                if symbol in changed_seed_symbols
+            ]
             boundary_locations = self._build_boundary_locations(path, tags_by_rel_fname, boundary_symbols)
             boundary_relations = []
             for step in steps:
@@ -1168,6 +1235,13 @@ class RepoMap:
                     RankingReason(
                         "impact_symbols",
                         f"Connected via symbols such as: {', '.join(symbol_preview[:4])}.",
+                    )
+                )
+            if changed_boundary_symbols:
+                reasons.append(
+                    RankingReason(
+                        "changed_symbol_boundary",
+                        f"Touches symbol(s) changed in {seed_rel}: {', '.join(changed_boundary_symbols[:4])}.",
                     )
                 )
             if is_test_file:
@@ -1214,6 +1288,8 @@ class RepoMap:
                     distance=distance,
                     path_from_seed=path,
                     steps=steps,
+                    seed_focus_lines=seed_focus_lines[:12],
+                    changed_boundary_symbols=changed_boundary_symbols,
                     boundary_symbols=boundary_symbols,
                     boundary_relations=boundary_relations[:5],
                     boundary_locations=boundary_locations,
@@ -1230,6 +1306,8 @@ class RepoMap:
 
         impacted_files.sort(
             key=lambda item: (
+                -(1 if item.changed_boundary_symbols else 0),
+                -len(item.changed_boundary_symbols),
                 item.distance,
                 -(
                     (3 if item.is_test_file else 0)
@@ -1242,7 +1320,7 @@ class RepoMap:
             )
         )
         report.impacted_files = impacted_files[:max_results]
-        report.shared_symbols = self._build_impact_symbols(report.impacted_files)
+        report.shared_symbols = self._build_impact_symbols(report.impacted_files, report.changed_seed_symbols)
         report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
 
         diagnostics = list(self.diagnostics)
@@ -1257,9 +1335,18 @@ class RepoMap:
         report.diagnostics = diagnostics
         return report
 
-    def _build_impact_symbols(self, impacted_files: List[ImpactTarget]) -> List[ImpactSymbol]:
+    def _build_impact_symbols(
+        self,
+        impacted_files: List[ImpactTarget],
+        changed_seed_symbols: Dict[str, List[str]],
+    ) -> List[ImpactSymbol]:
         """Aggregate the shared symbols that most often define impact boundaries."""
         by_symbol = {}
+        changed_symbol_names = {
+            symbol
+            for symbols in changed_seed_symbols.values()
+            for symbol in symbols
+        }
         for target in impacted_files:
             for symbol in target.boundary_symbols:
                 entry = by_symbol.setdefault(
@@ -1299,11 +1386,19 @@ class RepoMap:
                     seed_files=sorted(data["seed_files"]),
                     target_count=len(data["target_files"]),
                     closest_distance=data["closest_distance"],
+                    is_changed_seed_symbol=name in changed_symbol_names,
                     locations=data["locations"][:8],
                 )
             )
 
-        symbols.sort(key=lambda item: (-item.target_count, item.closest_distance or 99, item.name.lower()))
+        symbols.sort(
+            key=lambda item: (
+                -(1 if item.is_changed_seed_symbol else 0),
+                -item.target_count,
+                item.closest_distance or 99,
+                item.name.lower(),
+            )
+        )
         return symbols[:12]
 
     def _build_impact_suggestions(
@@ -1403,6 +1498,15 @@ class RepoMap:
                         seed_file=target.seed_file,
                         path_from_seed=target.path_from_seed,
                     )
+            if target.changed_boundary_symbols:
+                add_suggestion(
+                    1,
+                    "review_changed_symbol_boundary",
+                    target.path,
+                    f"Start with changed boundary symbols: {', '.join(target.changed_boundary_symbols[:3])}.",
+                    seed_file=target.seed_file,
+                    path_from_seed=target.path_from_seed,
+                )
 
         if not suggestions and impacted_files:
             first_target = impacted_files[0]

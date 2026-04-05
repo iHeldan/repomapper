@@ -484,6 +484,47 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("review_test", suggestion_kinds)
             self.assertIn("inspect_neighbor", suggestion_kinds)
 
+    def test_analyze_file_impact_uses_changed_seed_symbols_when_available(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("# test\n", encoding="utf-8")
+            service_file.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [
+                    Tag("app.py", str(app_file), 1, "run_app", "def"),
+                    Tag("app.py", str(app_file), 2, "Service", "ref"),
+                    Tag("app.py", str(app_file), 3, "helper", "ref"),
+                ],
+                "service.py": [
+                    Tag("service.py", str(service_file), 1, "Service", "def"),
+                    Tag("service.py", str(service_file), 2, "helper", "def"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(app_file)],
+                files=[str(app_file), str(service_file)],
+                max_depth=2,
+                max_results=5,
+                changed_lines_by_file={str(app_file): [2]},
+            )
+
+            self.assertEqual(report.changed_lines_by_file, {"app.py": [2]})
+            self.assertEqual(report.changed_seed_symbols, {"app.py": ["Service"]})
+            target = report.impacted_files[0]
+            self.assertEqual(target.changed_boundary_symbols, ["Service"])
+            self.assertEqual(target.seed_focus_lines, [2])
+            self.assertIn("changed_symbol_boundary", {reason.code for reason in target.reasons})
+            self.assertEqual(report.shared_symbols[0].name, "Service")
+            self.assertTrue(report.shared_symbols[0].is_changed_seed_symbol)
+            self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
@@ -832,11 +873,12 @@ class CliPathResolutionTests(unittest.TestCase):
 
             captured = {}
 
-            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10, changed_lines_by_file=None):
                 captured["seed_files"] = seed_files
                 captured["files"] = files
                 captured["max_depth"] = max_depth
                 captured["max_results"] = max_results
+                captured["changed_lines_by_file"] = changed_lines_by_file
                 return repomap_class.ImpactReport(
                     seed_files=["app.py"],
                     max_depth=max_depth,
@@ -848,6 +890,8 @@ class CliPathResolutionTests(unittest.TestCase):
                             distance=1,
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            seed_focus_lines=[2],
+                            changed_boundary_symbols=["Service"],
                             boundary_symbols=["Service"],
                             boundary_relations=["references"],
                             boundary_locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
@@ -862,6 +906,7 @@ class CliPathResolutionTests(unittest.TestCase):
                             seed_files=["app.py"],
                             target_count=1,
                             closest_distance=1,
+                            is_changed_seed_symbol=True,
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
@@ -905,12 +950,16 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual([Path(path).name for path in captured["seed_files"]], ["app.py"])
             self.assertEqual(captured["max_depth"], 3)
             self.assertEqual(captured["max_results"], 5)
+            self.assertIsNone(captured["changed_lines_by_file"])
             self.assertEqual(payload["seed_files"], ["app.py"])
             self.assertEqual(payload["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(payload["impacted_files"][0]["seed_focus_lines"], [2])
+            self.assertEqual(payload["impacted_files"][0]["changed_boundary_symbols"], ["Service"])
             self.assertEqual(payload["impacted_files"][0]["boundary_symbols"], ["Service"])
             self.assertEqual(payload["impacted_files"][0]["focus_lines"], [1])
             self.assertEqual(payload["impacted_files"][0]["boundary_locations"][0]["line"], 1)
             self.assertEqual(payload["shared_symbols"][0]["name"], "Service")
+            self.assertTrue(payload["shared_symbols"][0]["is_changed_seed_symbol"])
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
@@ -929,9 +978,10 @@ class CliPathResolutionTests(unittest.TestCase):
 
             captured = {}
 
-            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10, changed_lines_by_file=None):
                 captured["seed_files"] = seed_files
                 captured["files"] = files
+                captured["changed_lines_by_file"] = changed_lines_by_file
                 return repomap_class.ImpactReport(
                     seed_files=["changed.py"],
                     max_depth=max_depth,
@@ -963,6 +1013,7 @@ class CliPathResolutionTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual([Path(path).name for path in captured["seed_files"]], ["changed.py"])
             self.assertEqual(sorted(Path(path).name for path in captured["files"]), ["changed.py", "neighbor.py"])
+            self.assertEqual(captured["changed_lines_by_file"][str(changed_file)], [1])
             self.assertEqual(payload["seed_files"], ["changed.py"])
             self.assertIn("working tree", payload["diagnostics"][0].lower())
             self.assertEqual(stderr.getvalue(), "")
@@ -1074,7 +1125,7 @@ class RepoMapServerTests(unittest.TestCase):
             app_file.write_text("value = 1\n", encoding="utf-8")
             service_file.write_text("value = 2\n", encoding="utf-8")
 
-            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10, changed_lines_by_file=None):
                 return repomap_class.ImpactReport(
                     seed_files=["app.py"],
                     max_depth=max_depth,
@@ -1086,6 +1137,8 @@ class RepoMapServerTests(unittest.TestCase):
                             distance=1,
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            seed_focus_lines=[2],
+                            changed_boundary_symbols=["Service"],
                             boundary_symbols=["Service"],
                             boundary_relations=["references"],
                             boundary_locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
@@ -1100,6 +1153,7 @@ class RepoMapServerTests(unittest.TestCase):
                             seed_files=["app.py"],
                             target_count=1,
                             closest_distance=1,
+                            is_changed_seed_symbol=True,
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
@@ -1130,10 +1184,13 @@ class RepoMapServerTests(unittest.TestCase):
 
             self.assertEqual(result["seed_files"], ["app.py"])
             self.assertEqual(result["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(result["impacted_files"][0]["seed_focus_lines"], [2])
+            self.assertEqual(result["impacted_files"][0]["changed_boundary_symbols"], ["Service"])
             self.assertEqual(result["impacted_files"][0]["boundary_symbols"], ["Service"])
             self.assertEqual(result["impacted_files"][0]["focus_lines"], [1])
             self.assertEqual(result["impacted_files"][0]["boundary_locations"][0]["line"], 1)
             self.assertEqual(result["shared_symbols"][0]["name"], "Service")
+            self.assertTrue(result["shared_symbols"][0]["is_changed_seed_symbol"])
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
@@ -1149,9 +1206,10 @@ class RepoMapServerTests(unittest.TestCase):
 
             captured = {}
 
-            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10, changed_lines_by_file=None):
                 captured["seed_files"] = seed_files
                 captured["files"] = files
+                captured["changed_lines_by_file"] = changed_lines_by_file
                 return repomap_class.ImpactReport(
                     seed_files=["changed.py"],
                     max_depth=max_depth,
@@ -1164,7 +1222,15 @@ class RepoMapServerTests(unittest.TestCase):
 
             with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
                 with mock.patch.object(repomap_server, "find_src_files", return_value=[str(changed_file), str(neighbor_file)]):
-                    with mock.patch.object(repomap_server, "get_changed_files", return_value=git_support.GitFileSelectionResult(files=[str(changed_file)], diagnostics=["Collected 1 changed file."])):
+                    with mock.patch.object(
+                        repomap_server,
+                        "get_changed_files",
+                        return_value=git_support.GitFileSelectionResult(
+                            files=[str(changed_file)],
+                            changed_lines={str(changed_file): [1]},
+                            diagnostics=["Collected 1 changed file."],
+                        ),
+                    ):
                         with mock.patch.object(RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
                             result = asyncio.run(
                                 repomap_server.analyze_file_impact(
@@ -1177,6 +1243,7 @@ class RepoMapServerTests(unittest.TestCase):
 
             self.assertEqual([Path(path).name for path in captured["seed_files"]], ["changed.py"])
             self.assertEqual(sorted(Path(path).name for path in captured["files"]), ["changed.py", "neighbor.py"])
+            self.assertEqual(captured["changed_lines_by_file"][str(changed_file)], [1])
             self.assertEqual(result["seed_files"], ["changed.py"])
             self.assertEqual(result["diagnostics"][0], "Collected 1 changed file.")
 
@@ -1200,6 +1267,8 @@ class GitSupportTests(unittest.TestCase):
             self.assertIsNone(result.error)
             self.assertIn("working tree", result.diagnostics[0].lower())
             self.assertEqual(sorted(Path(path).name for path in result.files), ["changed.py", "new.py"])
+            self.assertEqual(result.changed_lines[str(changed)], [1])
+            self.assertEqual(result.changed_lines[str(root / "new.py")], [1])
 
     def test_get_changed_files_supports_base_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1219,6 +1288,7 @@ class GitSupportTests(unittest.TestCase):
             self.assertIsNone(result.error)
             self.assertIn("HEAD~1", result.diagnostics[0])
             self.assertEqual([Path(path).name for path in result.files], ["changed.py"])
+            self.assertEqual(result.changed_lines[str(changed)], [1])
 
 
 class ParserSupportTests(unittest.TestCase):

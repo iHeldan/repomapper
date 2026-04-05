@@ -116,6 +116,10 @@ def format_impact_report(report) -> str:
         lines.append("")
         lines.append(f"{target.path} (distance {target.distance}, from {target.seed_file})")
         lines.append(f"Path: {' -> '.join(target.path_from_seed)}")
+        if target.seed_focus_lines:
+            lines.append(f"Seed lines: {', '.join(str(line) for line in target.seed_focus_lines[:6])}")
+        if target.changed_boundary_symbols:
+            lines.append(f"Changed boundary symbols: {', '.join(target.changed_boundary_symbols[:5])}")
         if target.boundary_symbols:
             lines.append(f"Boundary symbols: {', '.join(target.boundary_symbols[:5])}")
         if target.boundary_relations:
@@ -151,6 +155,7 @@ def format_impact_report(report) -> str:
         lines.append("Shared symbols:")
         for symbol in report.shared_symbols[:8]:
             distance_suffix = f", closest hop {symbol.closest_distance}" if symbol.closest_distance is not None else ""
+            changed_suffix = " [changed]" if symbol.is_changed_seed_symbol else ""
             location_suffix = ""
             if symbol.locations:
                 location_preview = ", ".join(
@@ -159,8 +164,16 @@ def format_impact_report(report) -> str:
                 )
                 location_suffix = f" [{location_preview}]"
             lines.append(
-                f"- {symbol.name}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}{location_suffix}"
+                f"- {symbol.name}{changed_suffix}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}{location_suffix}"
             )
+
+    if report.changed_seed_symbols:
+        lines.append("")
+        lines.append("Changed seed symbols:")
+        for seed_file, symbols in sorted(report.changed_seed_symbols.items()):
+            seed_lines = report.changed_lines_by_file.get(seed_file, [])
+            line_suffix = f" (lines {', '.join(str(line) for line in seed_lines[:6])})" if seed_lines else ""
+            lines.append(f"- {seed_file}{line_suffix}: {', '.join(symbols[:6])}")
 
     if report.diagnostics:
         lines.append("")
@@ -497,6 +510,7 @@ Examples:
                     files=other_files,
                     max_depth=args.impact_max_depth,
                     max_results=args.impact_max_results,
+                    changed_lines_by_file=(git_result.changed_lines if git_result and args.impact_changed else None),
                 )
                 if git_result and args.impact_changed:
                     impact_report.diagnostics = list(dict.fromkeys(git_result.diagnostics + impact_report.diagnostics))

@@ -496,6 +496,7 @@ async def analyze_file_impact(
             files=abs_other,
             max_depth=max_depth,
             max_results=max_results,
+            changed_lines_by_file=(git_result.changed_lines if git_result else None),
         )
         if git_result:
             report.diagnostics = list(dict.fromkeys(git_result.diagnostics + report.diagnostics))
