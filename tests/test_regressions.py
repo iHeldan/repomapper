@@ -2400,6 +2400,21 @@ class GitSupportTests(unittest.TestCase):
 
             self.assertEqual(git_support.get_current_branch(str(root)), "main")
 
+    def test_get_changed_files_ignores_repomap_internal_cache_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+            cache_file = root / ".repomap.tags.cache.v1" / "cache.db"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text("cache", encoding="utf-8")
+
+            result = git_support.get_changed_files(str(root))
+
+            self.assertEqual(result.files, [])
+            self.assertEqual(result.changed_lines, {})
+
 
 class ParserSupportTests(unittest.TestCase):
     def test_infer_parser_languages_handles_vue_and_tsx(self):

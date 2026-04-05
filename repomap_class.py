@@ -4239,6 +4239,11 @@ class RepoMap:
                     result_lines.append(f"{loi:4d}: {lines[loi-1]}")
             result = "\n".join(result_lines)
 
+        if result:
+            first_line = result.splitlines()[0]
+            if not first_line.startswith(f"{rel_fname}:"):
+                result = f"{rel_fname}:\n{result}"
+
         self.tree_context_cache[cache_key] = result
         return result
     

@@ -8,6 +8,8 @@ from typing import Dict, Iterable, List, Optional
 
 from utils import is_within_directory
 
+INTERNAL_GIT_IGNORE_PREFIXES = (".repomap.",)
+
 
 @dataclass
 class GitFileSelectionResult:
@@ -42,6 +44,15 @@ def _normalize_git_paths(root_path: Path, rel_paths: Iterable[str]) -> List[str]
             normalized.append(str(abs_path))
 
     return normalized
+
+
+def _is_internal_tool_artifact(root_path: Path, abs_path: str) -> bool:
+    """Ignore RepoMap's own cache artifacts in git-aware workflows."""
+    try:
+        rel_path = Path(abs_path).resolve().relative_to(root_path.resolve())
+    except (ValueError, OSError):
+        return False
+    return any(part.startswith(INTERNAL_GIT_IGNORE_PREFIXES) for part in rel_path.parts)
 
 
 def _parse_diff_changed_lines(diff_text: str) -> Dict[str, set[int]]:
@@ -167,7 +178,11 @@ def get_changed_files(root: str, base_ref: str | None = None) -> GitFileSelectio
         return GitFileSelectionResult(error=error_text)
     changed_paths.update(untracked_proc.stdout.splitlines())
 
-    files = sorted(dict.fromkeys(_normalize_git_paths(root_path, changed_paths)))
+    files = sorted(
+        path
+        for path in dict.fromkeys(_normalize_git_paths(root_path, changed_paths))
+        if not _is_internal_tool_artifact(root_path, path)
+    )
     for abs_path in files:
         if abs_path in changed_lines:
             continue
@@ -181,6 +196,7 @@ def get_changed_files(root: str, base_ref: str | None = None) -> GitFileSelectio
         changed_lines={
             path: sorted(line_numbers)
             for path, line_numbers in sorted(changed_lines.items())
+            if not _is_internal_tool_artifact(root_path, path)
         },
         diagnostics=diagnostics,
     )
