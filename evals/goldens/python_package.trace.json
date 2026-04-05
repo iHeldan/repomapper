@@ -1,0 +1,37 @@
+{
+  "path": [
+    "consumer.py",
+    "package/__init__.py",
+    "package/service.py"
+  ],
+  "relations": [
+    "imports",
+    "package_reexports"
+  ],
+  "symbols": [
+    [
+      "api"
+    ],
+    [
+      "api"
+    ]
+  ],
+  "symbol_path": [
+    {
+      "relation": "imports",
+      "source_file": "consumer.py",
+      "target_file": "package/__init__.py",
+      "source_symbol": "api",
+      "target_symbol": "api",
+      "evidence_kind": "import"
+    },
+    {
+      "relation": "package_reexports",
+      "source_file": "package/__init__.py",
+      "target_file": "package/service.py",
+      "source_symbol": "api",
+      "target_symbol": "api",
+      "evidence_kind": "package_boundary"
+    }
+  ]
+}

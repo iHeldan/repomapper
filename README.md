@@ -121,6 +121,7 @@ This installs two console scripts:
 
 - `repomap` for the CLI
 - `repomap-mcp` for the MCP server
+- `repomap-eval` for fixture-backed golden evals
 
 Note: `tree-sitter-language-pack` may download parser binaries on first use. If you need offline execution, pre-warm the languages you care about while network access is available.
 
@@ -228,6 +229,22 @@ For task-focused workflows, pass `query="auth login flow"` to bias ranking towar
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files. Its response now includes symbol-level evidence such as callsites, imports, TS/JS re-exports, and Python package-boundary hops.
 The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, symbol-level path evidence, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
+
+### Evals
+
+Fixture-backed eval cases live under `evals/fixtures/`, and their expected normalized outputs live under `evals/goldens/`.
+
+Run all evals:
+
+```bash
+repomap-eval
+```
+
+Update goldens after an intentional behavior change:
+
+```bash
+repomap-eval --update
+```
 
 ## Dependencies
 

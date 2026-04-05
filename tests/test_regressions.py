@@ -13,6 +13,7 @@ from unittest import mock
 import git_support
 import parser_support
 import repomap
+import repomap_eval
 import repomap_class
 import repomap_server
 from repomap_class import FileReport, RankedFile, RankingReason, RepoMap, Tag
@@ -925,6 +926,16 @@ class SearchIdentifierCacheTests(unittest.TestCase):
 
             self.assertEqual(first["results"], [])
             self.assertEqual(second["results"][0]["name"], "foo")
+
+
+class EvalRunnerTests(unittest.TestCase):
+    def test_eval_runner_matches_goldens(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        summary = repomap_eval.run_evals(repo_root=repo_root)
+
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["passed"], 3)
+        self.assertEqual(summary["failed"], [])
 
 
 class CliPathResolutionTests(unittest.TestCase):
