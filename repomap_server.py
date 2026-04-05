@@ -39,6 +39,7 @@ def _validate_path_containment(file_path: str, root_str: str) -> bool:
 
 # R3 Finding B2-1: Cache RepoMap instances for search_identifiers
 _REPO_MAP_CACHE: Dict[str, Any] = {}
+_DEFAULT_MCP_RANKED_FILES_LIMIT = 50
 
 
 def _get_project_state(file_paths: List[str]) -> tuple:
@@ -51,6 +52,35 @@ def _get_project_state(file_paths: List[str]) -> tuple:
             continue
         state.append((file_path, stat_result.st_mtime_ns, stat_result.st_size))
     return tuple(sorted(state)), tuple(get_downloaded_parser_languages())
+
+
+def _serialize_repo_map_report(
+    file_report,
+    *,
+    include_ranked_files: bool = True,
+    ranked_files_limit: Optional[int] = _DEFAULT_MCP_RANKED_FILES_LIMIT,
+) -> Dict[str, Any]:
+    """Serialize FileReport with MCP-friendly ranked_files trimming."""
+    report = dataclasses.asdict(file_report)
+    ranked_files = report.get("ranked_files") or []
+    total_ranked_files = len(ranked_files)
+
+    if not include_ranked_files:
+        returned_ranked_files = []
+    elif ranked_files_limit is None or ranked_files_limit <= 0:
+        returned_ranked_files = ranked_files
+    else:
+        returned_ranked_files = ranked_files[:ranked_files_limit]
+
+    report["ranked_files"] = returned_ranked_files
+    report["ranked_files_total"] = total_ranked_files
+    report["ranked_files_returned"] = len(returned_ranked_files)
+    report["ranked_files_omitted"] = max(0, total_ranked_files - len(returned_ranked_files))
+    report["ranked_files_truncated"] = len(returned_ranked_files) < total_ranked_files
+    report["ranked_files_limit_applied"] = (
+        None if not include_ranked_files or ranked_files_limit is None or ranked_files_limit <= 0 else ranked_files_limit
+    )
+    return report
 
 # Configure logging - only show errors
 root_logger = logging.getLogger()
@@ -95,6 +125,8 @@ async def repo_map(
     mentioned_idents: Optional[List[str]] = None,
     verbose: bool = False,
     max_context_window: Optional[int] = None,
+    include_ranked_files: bool = True,
+    ranked_files_limit: int = _DEFAULT_MCP_RANKED_FILES_LIMIT,
 ) -> Dict[str, Any]:
     """Generate a repository map for the specified files, providing a list of function prototypes and variables for files as well as relevant related
     files. Provide filenames relative to the project_root. In addition to the files provided, relevant related files will also be included with a
@@ -116,6 +148,8 @@ async def repo_map(
     :param mentioned_idents: Optional list of identifiers explicitly mentioned in the conversation, to boost their ranking.
     :param verbose: If True, enables verbose logging for the RepoMap generation process. Defaults to False.
     :param max_context_window: Optional maximum context window size for token calculation, used to adjust map token limit when no chat files are provided.
+    :param include_ranked_files: If False, omit detailed ranked_files entries from the MCP report while keeping summary counters.
+    :param ranked_files_limit: Maximum number of ranked_files entries to include in the MCP report. Use 0 to return the full list.
     :returns: A dictionary containing:
         - 'map': the generated repository map string
         - 'report': a dictionary with file processing details including:
@@ -126,7 +160,8 @@ async def repo_map(
             - 'map_token_budget' / 'map_token_budget_mode': the effective cap and whether it was fixed vs auto/AI-guided
             - 'query' / 'query_terms': task query context used for ranking, when provided
             - 'changed_files' / 'changed_neighbor_depth': changed-file focus metadata for impact views
-            - 'ranked_files': per-file rank metadata and reason codes
+            - 'ranked_files': per-file rank metadata and reason codes (top 50 by default in MCP)
+            - 'ranked_files_total' / 'ranked_files_returned' / 'ranked_files_truncated': summary metadata for omitted ranked file rows
         Or an 'error' key if an error occurred.
     """
     if error := _check_project_root(project_root):
@@ -220,7 +255,11 @@ async def repo_map(
         
         return {
             "map": map_content or "No repository map could be generated.",
-            "report": dataclasses.asdict(file_report)
+            "report": _serialize_repo_map_report(
+                file_report,
+                include_ranked_files=include_ranked_files,
+                ranked_files_limit=ranked_files_limit,
+            ),
         }
     except Exception as e:
         log.exception(f"Error generating repository map for project '{project_root}': {e}")
