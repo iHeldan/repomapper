@@ -11,6 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from git_support import get_changed_files
 from utils import count_tokens, read_text, find_src_files
 from parser_support import infer_parser_languages, warm_languages
 from repomap_class import RepoMap
@@ -156,6 +157,17 @@ Examples:
         nargs="+",
         help="Download parser runtimes and exit. Use 'auto' to infer languages from the selected files."
     )
+
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="Limit the map to files changed in git (includes staged, unstaged, and untracked files)"
+    )
+
+    parser.add_argument(
+        "--base-ref",
+        help="When used with --changed, also include committed changes since the merge-base with this git ref"
+    )
     
     args = parser.parse_args()
     
@@ -170,9 +182,12 @@ Examples:
         'error': tool_error
     }
     
+    args.changed = args.changed or bool(args.base_ref)
+
     # Process file arguments
     root_path = Path(args.root).resolve()
     chat_files_from_args = args.chat_files or [] # These are the paths as strings from the CLI
+    explicit_other_specs = bool(args.other_files or args.paths)
     
     # Determine the list of unresolved path specifications that will form the 'other_files'
     # These can be files or directories. find_src_files will expand them.
@@ -188,6 +203,20 @@ Examples:
     # Expand relative path specs against the repository root before collecting files.
     chat_files = [str(resolve_repo_path(root_path, f).resolve()) for f in chat_files_from_args]
     other_files = expand_path_specs(root_path, unresolved_paths_for_other_files_specs)
+
+    if args.changed:
+        git_result = get_changed_files(str(root_path), args.base_ref)
+        if git_result.error:
+            tool_error(git_result.error)
+            sys.exit(1)
+
+        changed_set = set(git_result.files)
+        other_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+
+        if args.verbose:
+            for diagnostic in git_result.diagnostics:
+                tool_output(diagnostic)
+            tool_output(f"Changed files selected: {len(other_files)}")
 
     inferred_parser_languages = infer_parser_languages(chat_files + other_files)
 

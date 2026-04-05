@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import io
+import subprocess
 import sys
 import tempfile
 import time
@@ -8,12 +9,24 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import git_support
 import parser_support
 import repomap
 import repomap_class
 import repomap_server
 from repomap_class import FileReport, RepoMap, Tag
 from utils import find_src_files, is_within_directory
+
+
+def init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "-C", str(root), "init", "-b", "main"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "RepoMapper Tests"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "tests@example.com"], check=True, capture_output=True, text=True)
+
+
+def git_commit_all(root: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", message], check=True, capture_output=True, text=True)
 
 
 class RepoMapRankingTests(unittest.TestCase):
@@ -224,6 +237,101 @@ class CliPathResolutionTests(unittest.TestCase):
 
             infer_mock.assert_called_once()
             warm_mock.assert_called_once_with(["python"])
+
+    def test_cli_changed_mode_uses_git_worktree_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            stable = root / "stable.py"
+            changed = root / "changed.py"
+            stable.write_text("STABLE = 1\n", encoding="utf-8")
+            changed.write_text("CHANGED = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+
+            changed.write_text("CHANGED = 2\n", encoding="utf-8")
+            (root / "new.py").write_text("NEW = 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                captured["other_files"] = other_files
+                return None, FileReport({}, 0, 0, len(other_files or []))
+
+            with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
+                with mock.patch.object(sys, "argv", ["repomap.py", "--root", str(root), "--changed"]):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        repomap.main()
+
+            self.assertEqual(
+                sorted(Path(path).name for path in captured["other_files"]),
+                ["changed.py", "new.py"],
+            )
+
+    def test_cli_changed_mode_respects_base_ref(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            stable = root / "stable.py"
+            changed = root / "changed.py"
+            stable.write_text("STABLE = 1\n", encoding="utf-8")
+            changed.write_text("CHANGED = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+
+            changed.write_text("CHANGED = 2\n", encoding="utf-8")
+            git_commit_all(root, "update changed file")
+
+            captured = {}
+
+            def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                captured["other_files"] = other_files
+                return None, FileReport({}, 0, 0, len(other_files or []))
+
+            with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
+                with mock.patch.object(sys, "argv", ["repomap.py", "--root", str(root), "--changed", "--base-ref", "HEAD~1"]):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        repomap.main()
+
+            self.assertEqual([Path(path).name for path in captured["other_files"]], ["changed.py"])
+
+
+class GitSupportTests(unittest.TestCase):
+    def test_get_changed_files_collects_worktree_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            stable = root / "stable.py"
+            changed = root / "changed.py"
+            stable.write_text("STABLE = 1\n", encoding="utf-8")
+            changed.write_text("CHANGED = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+
+            changed.write_text("CHANGED = 2\n", encoding="utf-8")
+            (root / "new.py").write_text("NEW = 1\n", encoding="utf-8")
+
+            result = git_support.get_changed_files(str(root))
+
+            self.assertIsNone(result.error)
+            self.assertIn("working tree", result.diagnostics[0].lower())
+            self.assertEqual(sorted(Path(path).name for path in result.files), ["changed.py", "new.py"])
+
+    def test_get_changed_files_supports_base_ref(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            stable = root / "stable.py"
+            changed = root / "changed.py"
+            stable.write_text("STABLE = 1\n", encoding="utf-8")
+            changed.write_text("CHANGED = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+
+            changed.write_text("CHANGED = 2\n", encoding="utf-8")
+            git_commit_all(root, "update changed file")
+
+            result = git_support.get_changed_files(str(root), "HEAD~1")
+
+            self.assertIsNone(result.error)
+            self.assertIn("HEAD~1", result.diagnostics[0])
+            self.assertEqual([Path(path).name for path in result.files], ["changed.py"])
 
 
 class ParserSupportTests(unittest.TestCase):

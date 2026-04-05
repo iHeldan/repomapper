@@ -112,6 +112,12 @@ repomap /path/to/project --chat-files src/main.ts
 # Exclude low-rank files
 repomap /path/to/project --exclude-unranked
 
+# Focus only on local git changes
+repomap --root /path/to/project --changed
+
+# Compare the current branch against a git base ref
+repomap --root /path/to/project --changed --base-ref origin/main
+
 # Download missing parser runtimes before mapping
 repomap --root /path/to/project --download-missing-parsers
 
@@ -140,6 +146,7 @@ The server exposes a `repo_map` tool that any MCP-compatible AI agent can call.
 Security note: the bundled MCP server only accepts `project_root` values under `~/AI`, `~/Projects`, or `~/Coding`, and it rejects file paths that resolve outside the selected root, including symlink escapes.
 
 You can also ask the MCP tool to download missing parser runtimes by passing `download_missing_parsers=true`.
+For change-focused workflows, pass `changed_only=true` and optionally `base_ref="origin/main"` to restrict the map to git-changed files.
 
 ## Dependencies
 
