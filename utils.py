@@ -33,12 +33,21 @@ def count_tokens(text: str, model_name: str = "gpt-4") -> int:
 IGNORED_DIRS = {'node_modules', '__pycache__', 'venv', 'env', '.venv', 'dist', 'build'}
 
 
+def is_within_directory(path: str, root: str) -> bool:
+    """Return True when path resolves inside root, following symlinks safely."""
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def find_src_files(directory: str) -> List[str]:
     """Find source files in a directory using os.scandir (fast, symlink-safe)."""
     if not os.path.isdir(directory):
         return [directory] if os.path.isfile(directory) else []
     src_files = []
-    root_realpath = os.path.realpath(directory)
+    root_path = str(Path(directory).resolve())
     queue = [directory]
     while queue:
         curr_dir = queue.pop()
@@ -53,9 +62,8 @@ def find_src_files(directory: str) -> List[str]:
                     src_files.append(entry.path)
                 elif entry.is_symlink():
                     try:
-                        if os.path.realpath(entry.path).startswith(root_realpath):
-                            if entry.is_file():
-                                src_files.append(entry.path)
+                        if is_within_directory(entry.path, root_path) and entry.is_file():
+                            src_files.append(entry.path)
                     except OSError:
                         continue
         except OSError:

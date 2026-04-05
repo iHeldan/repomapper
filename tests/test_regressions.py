@@ -11,6 +11,7 @@ from unittest import mock
 import repomap
 import repomap_server
 from repomap_class import FileReport, RepoMap, Tag
+from utils import find_src_files, is_within_directory
 
 
 class RepoMapRankingTests(unittest.TestCase):
@@ -125,6 +126,52 @@ class CliPathResolutionTests(unittest.TestCase):
                         repomap.main()
 
                 self.assertEqual(captured["other_files"], [str(other_file.resolve())])
+
+                captured.clear()
+                with mock.patch.object(sys, "argv", ["repomap.py", "--root", str(root)]):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        repomap.main()
+
+                self.assertEqual(
+                    sorted(captured["other_files"]),
+                    sorted([str(chat_file.resolve()), str(other_file.resolve())]),
+                )
+
+
+class SymlinkContainmentTests(unittest.TestCase):
+    def test_path_containment_rejects_symlink_escaping_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir).resolve()
+            root = base / "root"
+            outside = base / "root-evil"
+            root.mkdir()
+            outside.mkdir()
+            (root / "sub").mkdir()
+
+            secret = outside / "secret.py"
+            secret.write_text("secret = 1\n", encoding="utf-8")
+            link = root / "sub" / "link.py"
+            link.symlink_to(secret)
+
+            self.assertFalse(is_within_directory(str(link), str(root)))
+            self.assertFalse(repomap_server._validate_path_containment("sub/link.py", str(root)))
+
+    def test_find_src_files_skips_symlinked_files_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir).resolve()
+            root = base / "root"
+            outside = base / "root-evil"
+            root.mkdir()
+            outside.mkdir()
+            (root / "sub").mkdir()
+            (root / "sub" / "real.py").write_text("value = 1\n", encoding="utf-8")
+
+            secret = outside / "secret.py"
+            secret.write_text("secret = 1\n", encoding="utf-8")
+            (root / "sub" / "link.py").symlink_to(secret)
+
+            found = sorted(str(Path(path).relative_to(root)) for path in find_src_files(str(root)))
+            self.assertEqual(found, ["sub/real.py"])
 
 
 if __name__ == "__main__":

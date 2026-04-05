@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 
 from fastmcp import FastMCP, settings
 from repomap_class import RepoMap
-from utils import count_tokens, read_text, find_src_files
+from utils import count_tokens, read_text, find_src_files, is_within_directory
 
 # Security: only allow project roots under these directories (pre-resolved at module load)
 _ALLOWED_ROOTS = [
@@ -31,8 +31,9 @@ def _check_project_root(project_root: str) -> Optional[Dict[str, str]]:
 
 def _validate_path_containment(file_path: str, root_str: str) -> bool:
     """Check that file_path resolves to within root_str."""
-    abs_path = os.path.abspath(os.path.join(root_str, file_path))
-    return abs_path.startswith(root_str + os.sep) or abs_path == root_str
+    candidate = Path(file_path)
+    resolved_path = candidate if candidate.is_absolute() else Path(root_str) / candidate
+    return is_within_directory(str(resolved_path), root_str)
 
 # R3 Finding B2-1: Cache RepoMap instances for search_identifiers
 _REPO_MAP_CACHE: Dict[str, Any] = {}

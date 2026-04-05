@@ -155,6 +155,8 @@ Examples:
         unresolved_paths_for_other_files_specs.extend(args.other_files)
     elif args.paths:  # Else, if positional paths are given, they are the source
         unresolved_paths_for_other_files_specs.extend(args.paths)
+    else:
+        unresolved_paths_for_other_files_specs.append(str(root_path))
     # If neither, unresolved_paths_for_other_files_specs remains empty.
 
     # Expand relative path specs against the repository root before collecting files.
