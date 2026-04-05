@@ -23,4 +23,4 @@ repomap-mcp = "repomap_server:main"
 repomap-eval = "repomap_eval:main"
 
 [tool.setuptools]
-py-modules = ["git_support", "repomap_server", "repomap", "repomap_class", "repomap_semantics", "repomap_eval", "repomap_config", "parser_support", "utils", "importance", "scm"]
+py-modules = ["git_support", "repomap_server", "repomap", "repomap_class", "repomap_semantics", "repomap_eval", "repomap_config", "repomap_budget", "parser_support", "utils", "importance", "scm"]

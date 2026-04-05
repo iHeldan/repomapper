@@ -84,7 +84,7 @@ async def repo_map(
     chat_files: Optional[List[str]] = None,
     other_files: Optional[List[str]] = None,
     query: Optional[str] = None,
-    token_limit: Any = 8192,  # Accept any type to handle empty strings
+    token_limit: Any = 8192,  # Accept ints, auto presets, or structured AI-guided hints
     exclude_unranked: bool = False,
     force_refresh: bool = False,
     changed_only: bool = False,
@@ -104,7 +104,8 @@ async def repo_map(
     :param chat_files: A list of file paths that are currently in the chat context. These files will receive the highest ranking.
     :param other_files: A list of other relevant file paths in the repository to consider for the map. They receive a lower ranking boost than mentioned_files and chat_files.
     :param query: Optional free-form task/query string used to bias ranking toward matching paths and symbols.
-    :param token_limit: The maximum number of tokens the generated repository map should occupy. Defaults to 8192.
+    :param token_limit: The map token budget. Accepts an integer, `auto`, `small`, `medium`, `large`,
+        or a structured object like {"mode": "ai_guided", "hint": "large"}. Defaults to 8192.
     :param exclude_unranked: If True, files with a PageRank of 0.0 will be excluded from the map. Defaults to False.
     :param force_refresh: If True, forces a refresh of the repository map cache. Defaults to False.
     :param changed_only: If True, limit the map to git-changed files under project_root.
@@ -122,6 +123,7 @@ async def repo_map(
             - 'definition_matches': count of matched definitions
             - 'reference_matches': count of matched references
             - 'total_files_considered': total files processed
+            - 'map_token_budget' / 'map_token_budget_mode': the effective cap and whether it was fixed vs auto/AI-guided
             - 'query' / 'query_terms': task query context used for ranking, when provided
             - 'changed_files' / 'changed_neighbor_depth': changed-file focus metadata for impact views
             - 'ranked_files': per-file rank metadata and reason codes
@@ -131,16 +133,6 @@ async def repo_map(
         return error
 
     # 1. Handle and validate parameters
-    # Convert token_limit to integer with fallback
-    try:
-        token_limit = int(token_limit) if token_limit else 8192
-    except (TypeError, ValueError):
-        token_limit = 8192
-    
-    # Ensure token_limit is positive
-    if token_limit <= 0:
-        token_limit = 8192
-
     changed_only = changed_only or bool(base_ref) or changed_neighbors > 0
     
     chat_files_list = chat_files or []

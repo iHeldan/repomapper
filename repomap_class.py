@@ -21,6 +21,7 @@ from scm import get_scm_fname
 from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
 from repomap_config import load_repo_map_config
+from repomap_budget import parse_map_budget_request, resolve_map_budget
 from repomap_semantics import collect_semantic_links, SemanticLink
 
 try:
@@ -98,6 +99,10 @@ class FileReport:
     ranked_files: List[RankedFile] = field(default_factory=list)
     selected_files: List[str] = field(default_factory=list)
     map_tokens: int = 0
+    map_token_budget: int = 0
+    map_token_budget_mode: str = "fixed"
+    map_token_budget_request: Optional[str] = None
+    map_token_budget_reason: Optional[str] = None
 
 
 @dataclass
@@ -422,7 +427,7 @@ class RepoMap:
     
     def __init__(
         self,
-        map_tokens: int = 1024,
+        map_tokens: object = 1024,
         root: str = None,
         token_counter_func: Callable[[str], int] = count_tokens,
         file_reader_func: Callable[[str], Optional[str]] = read_text,
@@ -434,7 +439,8 @@ class RepoMap:
         exclude_unranked: bool = False
     ):
         """Initialize RepoMap instance."""
-        self.max_map_tokens = map_tokens
+        self.map_budget_request = parse_map_budget_request(map_tokens, default_tokens=1024)
+        self.max_map_tokens = self.map_budget_request.requested_tokens or 1024
         self.root = Path(root or os.getcwd()).resolve()
         self.token_count_func_internal = token_counter_func
         self.read_text_func_internal = file_reader_func
@@ -476,6 +482,14 @@ class RepoMap:
 
         # Load persistent tags cache
         self.load_tags_cache()
+
+    def _apply_map_budget_metadata(self, report: FileReport, budget_decision) -> FileReport:
+        """Attach budget bookkeeping fields to a report."""
+        report.map_token_budget = budget_decision.effective_tokens
+        report.map_token_budget_mode = budget_decision.mode
+        report.map_token_budget_request = budget_decision.request
+        report.map_token_budget_reason = budget_decision.reason
+        return report
     
     def load_tags_cache(self):
         """Load the persistent tags cache. Reuses global SQLite connection per root dir (R2 Finding #1)."""
@@ -4473,19 +4487,27 @@ class RepoMap:
             changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
             changed_neighbor_depth=changed_neighbor_depth,
         )
+        if self.map_budget_request.diagnostic:
+            self._add_diagnostic(self.map_budget_request.diagnostic)
+
+        budget_decision = resolve_map_budget(
+            self.map_budget_request,
+            total_files=len(other_files),
+            chat_file_count=len(chat_files),
+            mentioned_file_count=len(mentioned_fnames or []),
+            query_terms=empty_report.query_terms,
+            changed_file_count=len(changed_fnames or []),
+            changed_neighbor_depth=changed_neighbor_depth,
+            max_context_window=self.max_context_window,
+            map_mul_no_files=self.map_mul_no_files,
+        )
+        empty_report.diagnostics = list(self.diagnostics)
+        self._apply_map_budget_metadata(empty_report, budget_decision)
         
         if self.max_map_tokens <= 0 or not other_files:
             return None, empty_report
-        
-        # Adjust max_map_tokens if no chat files
-        max_map_tokens = self.max_map_tokens
-        if not chat_files and self.max_context_window:
-            padding = 1024
-            available = self.max_context_window - padding
-            max_map_tokens = min(
-                max_map_tokens * self.map_mul_no_files,
-                available
-            )
+
+        max_map_tokens = budget_decision.effective_tokens
         
         try:
             # get_ranked_tags_map returns (map_string, file_report)
@@ -4508,10 +4530,17 @@ class RepoMap:
                 query_terms=self._extract_query_terms(query),
                 changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
                 changed_neighbor_depth=changed_neighbor_depth,
+                map_token_budget=budget_decision.effective_tokens,
+                map_token_budget_mode=budget_decision.mode,
+                map_token_budget_request=budget_decision.request,
+                map_token_budget_reason=budget_decision.reason,
             )  # Ensure consistent return type
         
         if map_string is None:
+            self._apply_map_budget_metadata(file_report, budget_decision)
             return None, file_report
+
+        self._apply_map_budget_metadata(file_report, budget_decision)
         
         if self.verbose:
             tokens = self.token_count(map_string)

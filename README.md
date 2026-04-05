@@ -18,7 +18,7 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 10. **Traces** shortest file-level connection paths across the repository graph
 11. **Analyzes** likely impact radius around one or more seed files, including nearby tests and boundary files
 12. **Projects** that impact analysis into concrete edit candidates and a lightweight "what to edit next" plan
-13. **Compresses** the output to fit within a token budget (default 8192 tokens)
+13. **Compresses** the output to fit within a token budget, with optional `auto` / AI-guided sizing on top of the default fixed 8192-token mode
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -47,6 +47,8 @@ app/components/FilterPanel.vue:
   │function handleFilterChange(value: string | number): void {
   █  const parsed = parseFilter(value)
 ```
+
+For broader discovery tasks, you can also let RepoMapper choose the map budget dynamically with `--map-tokens auto`, or steer it with an AI-friendly size hint like `small`, `medium`, or `large`.
 
 ## Fork changes
 
@@ -142,6 +144,10 @@ repomap --root /path/to/project
 # With custom token budget
 repomap /path/to/project --map-tokens 4096
 
+# Let RepoMapper choose a dynamic budget, or steer it with a coarse AI-style hint
+repomap /path/to/project --map-tokens auto
+repomap /path/to/project --map-tokens large
+
 # Prioritize specific files (e.g., files you're editing)
 repomap /path/to/project --chat-files src/main.ts
 
@@ -195,6 +201,7 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 - `summary_kind` / `summary_items`: lightweight structured highlights extracted from important docs and config files
 - `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
 - `map_tokens`: estimated token cost of the rendered map
+- `map_token_budget` / `map_token_budget_mode` / `map_token_budget_request` / `map_token_budget_reason`: the effective budget cap, whether it was fixed vs auto/AI-guided, the original request, and why RepoMapper chose that cap
 
 When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mode and returns either:
 
@@ -277,7 +284,8 @@ You can also ask the MCP tool to download missing parser runtimes by passing `do
 For change-focused workflows, pass `changed_only=true` and optionally `base_ref="origin/main"` to restrict the map to git-changed files.
 For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include nearby graph neighbors around those changed files.
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
-The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
+For budget-sensitive workflows, pass `token_limit="auto"` or `token_limit="small"|"medium"|"large"` (or a structured object like `{"mode":"ai_guided","hint":"large"}`) to let an agent steer map size without hard-coding a number.
+The `report` payload also includes structured `ranked_files`, `selected_files`, `map_tokens`, and map-budget metadata fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files. Its response now includes symbol-level evidence such as callsites, imports, TS/JS re-exports, and Python package-boundary hops.
 The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, symbol-level path evidence, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
 The server also exposes `review_changes` for PR/review-style workflows. It combines git-changed files, branch metadata, changed diff anchors, public API and entrypoint surfaces, grouped nearby tests, and a prioritized `review_focus` queue on top of the existing impact analysis payload.

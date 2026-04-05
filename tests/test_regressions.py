@@ -13,6 +13,7 @@ from unittest import mock
 import git_support
 import parser_support
 import repomap
+import repomap_budget
 import repomap_eval
 import repomap_class
 import repomap_server
@@ -32,6 +33,50 @@ def git_commit_all(root: Path, message: str) -> None:
 
 
 class RepoMapRankingTests(unittest.TestCase):
+    def test_get_repo_map_records_auto_budget_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_ranked_tags_map(
+                self,
+                chat_fnames,
+                other_fnames,
+                max_map_tokens,
+                mentioned_fnames=None,
+                mentioned_idents=None,
+                changed_fnames=None,
+                changed_neighbor_depth=0,
+                query=None,
+                force_refresh=False,
+            ):
+                captured["budget"] = max_map_tokens
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded={},
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=1,
+                    query=query,
+                    query_terms=self._extract_query_terms(query),
+                )
+
+            repo_map = RepoMap(root=str(root), map_tokens="auto", token_counter_func=lambda text: len(text.split()))
+            with mock.patch.object(RepoMap, "get_ranked_tags_map", new=fake_get_ranked_tags_map):
+                map_content, file_report = repo_map.get_repo_map(
+                    chat_files=[],
+                    other_files=[str(source_file)],
+                    query="investigate auth plugin wiring",
+                )
+
+            self.assertIsNotNone(map_content)
+            self.assertEqual(file_report.map_token_budget, captured["budget"])
+            self.assertEqual(file_report.map_token_budget_mode, "auto")
+            self.assertEqual(file_report.map_token_budget_request, "auto")
+            self.assertIn("Auto budget chose", file_report.map_token_budget_reason)
+
     def test_pagerank_runs_without_chat_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -1240,6 +1285,36 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertEqual(summary["failed"], [])
 
 
+class MapBudgetTests(unittest.TestCase):
+    def test_auto_budget_scales_up_for_broader_scope(self):
+        request = repomap_budget.parse_map_budget_request("auto", default_tokens=8192)
+
+        broad = repomap_budget.resolve_map_budget(
+            request,
+            total_files=3200,
+            chat_file_count=0,
+            mentioned_file_count=2,
+            query_terms=["where", "is", "the", "public", "api"],
+            changed_file_count=0,
+            changed_neighbor_depth=0,
+            max_context_window=None,
+        )
+        focused = repomap_budget.resolve_map_budget(
+            request,
+            total_files=24,
+            chat_file_count=1,
+            mentioned_file_count=0,
+            query_terms=["fix"],
+            changed_file_count=0,
+            changed_neighbor_depth=0,
+            max_context_window=None,
+        )
+
+        self.assertEqual(broad.mode, "auto")
+        self.assertGreater(broad.effective_tokens, focused.effective_tokens)
+        self.assertIn("Auto budget chose", broad.reason)
+
+
 class CliPathResolutionTests(unittest.TestCase):
     def test_cli_resolves_relative_paths_against_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1466,6 +1541,56 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["report"]["selected_files"], ["app.py"])
             self.assertEqual(payload["report"]["ranked_files"][0]["path"], "app.py")
             self.assertEqual(payload["report"]["ranked_files"][0]["reasons"][0]["code"], "definitions")
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_accepts_auto_map_budget_and_emits_budget_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                captured["mode"] = self.map_budget_request.mode
+                captured["request"] = self.map_budget_request.raw_value
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded={},
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=1,
+                    map_token_budget=4096,
+                    map_token_budget_mode=self.map_budget_request.mode,
+                    map_token_budget_request=self.map_budget_request.raw_value,
+                    map_token_budget_reason="Auto budget chose 4096 tokens (medium).",
+                )
+
+            with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "repomap.py",
+                        "--root",
+                        str(root),
+                        "--map-tokens",
+                        "auto",
+                        "--output-format",
+                        "json",
+                        "app.py",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(captured["mode"], "auto")
+            self.assertEqual(captured["request"], "auto")
+            self.assertEqual(payload["report"]["map_token_budget"], 4096)
+            self.assertEqual(payload["report"]["map_token_budget_mode"], "auto")
+            self.assertEqual(payload["report"]["map_token_budget_request"], "auto")
             self.assertEqual(stderr.getvalue(), "")
 
     def test_cli_trace_mode_can_emit_json(self):
@@ -2031,6 +2156,44 @@ class CliPathResolutionTests(unittest.TestCase):
 class RepoMapServerTests(unittest.TestCase):
     def tearDown(self):
         repomap_server._REPO_MAP_CACHE.clear()
+
+    def test_repo_map_accepts_ai_guided_token_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_get_repo_map(self, **kwargs):
+                captured["mode"] = self.map_budget_request.mode
+                captured["request"] = self.map_budget_request.raw_value
+                captured["hint"] = self.map_budget_request.hint
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", FileReport(
+                    excluded={},
+                    definition_matches=1,
+                    reference_matches=0,
+                    total_files_considered=1,
+                    map_token_budget=8192,
+                    map_token_budget_mode=self.map_budget_request.mode,
+                    map_token_budget_request=self.map_budget_request.raw_value,
+                    map_token_budget_reason="AI-guided budget request 'large' resolved to 8192 tokens (large).",
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(source_file)]):
+                    with mock.patch.object(RepoMap, "get_repo_map", new=fake_get_repo_map):
+                        result = asyncio.run(
+                            repomap_server.repo_map(
+                                str(root),
+                                token_limit={"mode": "ai_guided", "hint": "large"},
+                            )
+                        )
+
+            self.assertEqual(captured["mode"], "ai_guided")
+            self.assertEqual(captured["hint"], "large")
+            self.assertEqual(result["report"]["map_token_budget_mode"], "ai_guided")
+            self.assertEqual(result["report"]["map_token_budget"], 8192)
 
     def test_repo_map_passes_query_to_repo_mapper(self):
         with tempfile.TemporaryDirectory() as tmpdir:

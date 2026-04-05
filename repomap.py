@@ -476,6 +476,7 @@ def main():
 Examples:
   %(prog)s .                    # Map current directory
   %(prog)s src/ --map-tokens 2048  # Map src/ with 2048 token limit
+  %(prog)s src/ --map-tokens auto  # Let RepoMap choose a dynamic budget
   %(prog)s file1.py file2.py    # Map specific files
   %(prog)s --chat-files main.py --other-files src/  # Specify chat vs other files
         """
@@ -495,9 +496,8 @@ Examples:
     
     parser.add_argument(
         "--map-tokens",
-        type=int,
-        default=8192,
-        help="Maximum tokens for the generated map (default: 8192)"
+        default="8192",
+        help="Maximum tokens for the generated map, or auto|small|medium|large (default: 8192)"
     )
     
     parser.add_argument(
@@ -888,6 +888,11 @@ Examples:
             else:
                 if args.verbose:
                     tokens = repo_map.token_count(map_content)
+                    tool_output(
+                        "Budget: "
+                        f"{file_report.map_token_budget} tokens "
+                        f"({file_report.map_token_budget_mode}, request {file_report.map_token_budget_request})"
+                    )
                     tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
                     tool_output(f"Files considered: {file_report.total_files_considered}, "
                                f"Definitions: {file_report.definition_matches}, "
