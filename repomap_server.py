@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 from fastmcp import FastMCP, settings
 from git_support import get_changed_files
 from parser_support import infer_parser_languages, warm_languages, get_downloaded_parser_languages
-from repomap_class import RepoMap
+from repomap_class import RepoMap, ImpactReport
 from utils import count_tokens, read_text, find_src_files, is_within_directory
 
 # Security: only allow project roots under these directories (pre-resolved at module load)
@@ -407,8 +407,10 @@ async def trace_file_path(
 @mcp.tool()
 async def analyze_file_impact(
     project_root: str,
-    seed_files: List[str],
+    seed_files: Optional[List[str]] = None,
     other_files: Optional[List[str]] = None,
+    changed_only: bool = False,
+    base_ref: Optional[str] = None,
     max_depth: int = 2,
     max_results: int = 10,
     download_missing_parsers: bool = False,
@@ -418,6 +420,8 @@ async def analyze_file_impact(
     :param project_root: Root directory of the project to search. (must be an absolute path!)
     :param seed_files: Seed file paths relative to project_root, or absolute paths under it.
     :param other_files: Optional file scope to limit the search. Defaults to all source files under project_root.
+    :param changed_only: If True, derive the impact seed set from git-changed files under project_root.
+    :param base_ref: Optional git ref to compare against when changed_only is enabled.
     :param max_depth: Maximum graph distance to consider. Defaults to 2.
     :param max_results: Maximum impacted files to return. Defaults to 10.
     :param download_missing_parsers: If True, attempts to download required parser runtimes before building the graph.
@@ -425,6 +429,10 @@ async def analyze_file_impact(
     """
     if error := _check_project_root(project_root):
         return error
+    if changed_only and seed_files:
+        return {"error": "Provide either seed_files or changed_only=true, not both."}
+    if not changed_only and not seed_files:
+        return {"error": "Provide seed_files, or set changed_only=true to derive them from git changes."}
 
     root_path = Path(project_root).resolve()
     root_str = str(root_path)
@@ -436,19 +444,40 @@ async def analyze_file_impact(
     def _run_impact():
         effective_other_files = other_files if other_files is not None else find_src_files(project_root)
         abs_other = [_to_abs(f) for f in effective_other_files if _validate_path_containment(f, root_str)]
-        abs_seed_files = [_to_abs(f) for f in seed_files]
+        git_result = None
+        provided_seed_files = seed_files or []
+
+        if changed_only:
+            git_result = get_changed_files(root_str, base_ref)
+            if git_result.error:
+                return {"error": git_result.error}
+            changed_set = set(git_result.files)
+            abs_seed_files = [path for path in abs_other if path in changed_set] if other_files is not None else git_result.files
+            abs_seed_files = list(dict.fromkeys(abs_seed_files))
+        else:
+            abs_seed_files = [_to_abs(f) for f in provided_seed_files]
 
         invalid_seed_files = [
-            seed_file for seed_file, abs_seed in zip(seed_files, abs_seed_files)
+            seed_file for seed_file, abs_seed in zip(provided_seed_files, abs_seed_files)
             if not _validate_path_containment(abs_seed, root_str)
         ]
-        if invalid_seed_files:
+        if invalid_seed_files and not changed_only:
             return {
                 "error": (
                     "Seed file(s) resolve outside the project root: "
                     + ", ".join(invalid_seed_files)
                 )
             }
+
+        if changed_only and not abs_seed_files:
+            return dataclasses.asdict(
+                ImpactReport(
+                    seed_files=[],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    diagnostics=(git_result.diagnostics[:] if git_result else []) + ["No changed files found for impact analysis."],
+                )
+            )
 
         if download_missing_parsers:
             warm_languages(infer_parser_languages(abs_other + abs_seed_files))
@@ -468,6 +497,8 @@ async def analyze_file_impact(
             max_depth=max_depth,
             max_results=max_results,
         )
+        if git_result:
+            report.diagnostics = list(dict.fromkeys(git_result.diagnostics + report.diagnostics))
         return dataclasses.asdict(report)
 
     try:

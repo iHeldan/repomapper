@@ -145,6 +145,9 @@ repomap --root /path/to/project --trace-from app.py --trace-to api/routes.py
 # Analyze likely impact neighbors around one or more seed files
 repomap --root /path/to/project --impact-from app.py service.py
 
+# Analyze likely impact radius around your current git changes
+repomap --root /path/to/project --impact-changed --base-ref origin/main
+
 # Download missing parser runtimes before mapping
 repomap --root /path/to/project --download-missing-parsers
 
@@ -171,7 +174,7 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 - a readable hop-by-hop explanation in text mode
 - or a structured `path` + `steps` payload in JSON mode
 
-When using `--impact-from`, the CLI switches to impact-analysis mode and returns either:
+When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
 - or a structured `seed_files` + `impacted_files` payload in JSON mode
@@ -202,7 +205,7 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files.
-The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`.
 
 ## Dependencies
 

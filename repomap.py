@@ -16,7 +16,7 @@ from pathlib import Path
 from git_support import get_changed_files
 from utils import count_tokens, read_text, find_src_files
 from parser_support import infer_parser_languages, warm_languages
-from repomap_class import RepoMap
+from repomap_class import RepoMap, ImpactReport
 
 
 def resolve_repo_path(root_path: Path, path_str: str) -> Path:
@@ -107,7 +107,7 @@ def format_impact_report(report) -> str:
         return "\n".join(lines)
 
     lines = [
-        f"Impact analysis from: {', '.join(report.seed_files)}",
+        f"Impact analysis from: {', '.join(report.seed_files) if report.seed_files else '(none)'}",
         f"Depth: <= {report.max_depth} hops",
         f"Results: {len(report.impacted_files)}",
     ]
@@ -221,6 +221,12 @@ Examples:
     )
 
     parser.add_argument(
+        "--impact-changed",
+        action="store_true",
+        help="Analyze likely impact radius around git-changed files"
+    )
+
+    parser.add_argument(
         "--impact-max-depth",
         type=int,
         default=2,
@@ -315,7 +321,8 @@ Examples:
         'error': tool_error
     }
     
-    args.changed = args.changed or bool(args.base_ref) or args.changed_neighbors > 0
+    map_changed_mode = args.changed or args.changed_neighbors > 0 or (bool(args.base_ref) and not args.impact_changed)
+    impact_mode = bool(args.impact_from) or args.impact_changed
 
     # Process file arguments
     root_path = Path(args.root).resolve()
@@ -343,37 +350,53 @@ Examples:
     if bool(trace_from) != bool(trace_to):
         tool_error("Both --trace-from and --trace-to must be provided together.")
         sys.exit(1)
-    if trace_from and impact_from:
+    if args.impact_changed and impact_from:
+        tool_error("Use either --impact-from or --impact-changed, not both.")
+        sys.exit(1)
+    if trace_from and impact_mode:
         tool_error("Trace mode and impact mode cannot be used together.")
         sys.exit(1)
+    if impact_mode and (args.changed or args.changed_neighbors > 0):
+        tool_error("Map-focused changed mode cannot be combined with impact mode. Use --impact-changed and optional --base-ref instead.")
+        sys.exit(1)
 
+    git_result = None
     changed_files = []
+    impact_seed_files = impact_from[:]
 
-    if args.changed:
+    if map_changed_mode or args.impact_changed:
         git_result = get_changed_files(str(root_path), args.base_ref)
         if git_result.error:
             tool_error(git_result.error)
             sys.exit(1)
 
         changed_set = set(git_result.files)
-        changed_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
-        if args.changed_neighbors > 0:
-            if not changed_files:
-                other_files = []
-        else:
-            other_files = changed_files
-
         if args.verbose:
             for diagnostic in git_result.diagnostics:
                 info_handler(diagnostic)
-            info_handler(f"Changed files selected: {len(changed_files)}")
-            if args.changed_neighbors > 0 and changed_files:
-                info_handler(
-                    f"Including repository neighbors up to distance {args.changed_neighbors} around changed files."
-                )
+        if map_changed_mode:
+            changed_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+            if args.changed_neighbors > 0:
+                if not changed_files:
+                    other_files = []
+            else:
+                other_files = changed_files
+
+            if args.verbose:
+                info_handler(f"Changed files selected: {len(changed_files)}")
+                if args.changed_neighbors > 0 and changed_files:
+                    info_handler(
+                        f"Including repository neighbors up to distance {args.changed_neighbors} around changed files."
+                    )
+
+        if args.impact_changed:
+            impact_seed_files = [path for path in other_files if path in changed_set] if explicit_other_specs else git_result.files
+            impact_seed_files = list(dict.fromkeys(impact_seed_files))
+            if args.verbose:
+                info_handler(f"Impact seed files selected from git: {len(impact_seed_files)}")
 
     inferred_parser_languages = infer_parser_languages(
-        chat_files + other_files + impact_from + [path for path in (trace_from, trace_to) if path]
+        chat_files + other_files + impact_seed_files + [path for path in (trace_from, trace_to) if path]
     )
 
     if args.warm_languages:
@@ -426,13 +449,23 @@ Examples:
                 sys.exit(1)
             return
 
-        if impact_from:
-            impact_report = repo_map.analyze_file_impact(
-                impact_from,
-                files=other_files,
-                max_depth=args.impact_max_depth,
-                max_results=args.impact_max_results,
-            )
+        if impact_mode:
+            if not impact_seed_files:
+                impact_report = ImpactReport(
+                    seed_files=[],
+                    max_depth=args.impact_max_depth,
+                    max_results=args.impact_max_results,
+                    diagnostics=(git_result.diagnostics[:] if git_result else []) + ["No changed files found for impact analysis."],
+                )
+            else:
+                impact_report = repo_map.analyze_file_impact(
+                    impact_seed_files,
+                    files=other_files,
+                    max_depth=args.impact_max_depth,
+                    max_results=args.impact_max_results,
+                )
+                if git_result and args.impact_changed:
+                    impact_report.diagnostics = list(dict.fromkeys(git_result.diagnostics + impact_report.diagnostics))
 
             if args.output_format == "json":
                 print(json.dumps(dataclasses.asdict(impact_report), indent=2))

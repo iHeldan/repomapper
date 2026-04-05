@@ -868,6 +868,55 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_cli_impact_changed_uses_git_seeds_without_narrowing_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            init_git_repo(root)
+            changed_file = root / "changed.py"
+            neighbor_file = root / "neighbor.py"
+            changed_file.write_text("CHANGED = 1\n", encoding="utf-8")
+            neighbor_file.write_text("NEIGHBOR = 1\n", encoding="utf-8")
+            git_commit_all(root, "initial")
+            changed_file.write_text("CHANGED = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+                captured["seed_files"] = seed_files
+                captured["files"] = files
+                return repomap_class.ImpactReport(
+                    seed_files=["changed.py"],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    impacted_files=[],
+                    diagnostics=["No impacted files."],
+                )
+
+            with mock.patch.object(repomap.RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "repomap.py",
+                        "--root",
+                        str(root),
+                        "--impact-changed",
+                        "--output-format",
+                        "json",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual([Path(path).name for path in captured["seed_files"]], ["changed.py"])
+            self.assertEqual(sorted(Path(path).name for path in captured["files"]), ["changed.py", "neighbor.py"])
+            self.assertEqual(payload["seed_files"], ["changed.py"])
+            self.assertIn("working tree", payload["diagnostics"][0].lower())
+            self.assertEqual(stderr.getvalue(), "")
+
 
 class RepoMapServerTests(unittest.TestCase):
     def tearDown(self):
@@ -1009,6 +1058,45 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["impacted_files"][0]["path"], "service.py")
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(result["diagnostics"], ["Found 1 impacted file."])
+
+    def test_analyze_file_impact_tool_can_use_git_changed_seeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            changed_file = root / "changed.py"
+            neighbor_file = root / "neighbor.py"
+            changed_file.write_text("value = 1\n", encoding="utf-8")
+            neighbor_file.write_text("value = 2\n", encoding="utf-8")
+
+            captured = {}
+
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10):
+                captured["seed_files"] = seed_files
+                captured["files"] = files
+                return repomap_class.ImpactReport(
+                    seed_files=["changed.py"],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    impacted_files=[],
+                    diagnostics=["Found changed impact context."],
+                )
+
+            with mock.patch.object(repomap_server, "_check_project_root", return_value=None):
+                with mock.patch.object(repomap_server, "find_src_files", return_value=[str(changed_file), str(neighbor_file)]):
+                    with mock.patch.object(repomap_server, "get_changed_files", return_value=git_support.GitFileSelectionResult(files=[str(changed_file)], diagnostics=["Collected 1 changed file."])):
+                        with mock.patch.object(RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
+                            result = asyncio.run(
+                                repomap_server.analyze_file_impact(
+                                    str(root),
+                                    changed_only=True,
+                                    max_depth=3,
+                                    max_results=5,
+                                )
+                            )
+
+            self.assertEqual([Path(path).name for path in captured["seed_files"]], ["changed.py"])
+            self.assertEqual(sorted(Path(path).name for path in captured["files"]), ["changed.py", "neighbor.py"])
+            self.assertEqual(result["seed_files"], ["changed.py"])
+            self.assertEqual(result["diagnostics"][0], "Collected 1 changed file.")
 
 
 class GitSupportTests(unittest.TestCase):
