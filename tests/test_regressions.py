@@ -868,6 +868,14 @@ class RepoMapRankingTests(unittest.TestCase):
         self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", entrypoint_target), "entrypoint")
         self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", None), "neighbor")
 
+    def test_next_app_route_named_test_is_not_misclassified_as_test_file(self):
+        repo_map = RepoMap(root=".", token_counter_func=lambda text: len(text.split()))
+
+        self.assertFalse(repo_map._is_test_file("src/app/api/game/test/route.ts"))
+        entrypoint_signals, public_api_signals = repo_map._get_path_role_signals("src/app/api/game/test/route.ts")
+        self.assertEqual(entrypoint_signals, [])
+        self.assertIn("public_api_next_route", public_api_signals)
+
 
 class RepoMapReviewTests(unittest.TestCase):
     def test_build_review_report_combines_changed_surfaces_and_impact_actions(self):

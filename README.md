@@ -99,6 +99,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Impact analysis now also surfaces shared boundary symbols, changed seed symbols, diff hunks, concrete file/line locations, and short boundary snippets so agents can jump straight to the likely change boundary
 - `suggested_checks` can now point directly at a boundary line/snippet instead of only naming a file
 - Review mode now combines branch context, changed-file diff anchors, public API / entrypoint / config surfaces, nearby tests, and impact-based `review_focus` priorities into a single "what to check first" view
+- Next-style `app/api/*/route.ts` handlers are now treated as public API surfaces instead of being misclassified as tests when an endpoint segment happens to be named `test`
 
 ## Supported languages
 

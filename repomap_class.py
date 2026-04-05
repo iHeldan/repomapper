@@ -406,6 +406,7 @@ PUBLIC_API_FILENAMES = {
     "__init__.py", "index.ts", "index.tsx", "index.js", "index.jsx",
     "api.py", "api.ts", "api.tsx", "api.js", "api.jsx",
     "client.py", "client.ts", "client.js",
+    "route.ts", "route.tsx", "route.js", "route.jsx",
     "routes.py", "routes.ts", "routes.js",
     "router.py", "router.ts", "router.js",
     "urls.py", "urls.ts", "urls.js",
@@ -708,6 +709,9 @@ class RepoMap:
         basename = parts[-1]
         stem = Path(basename).stem.lower()
 
+        if self._looks_like_next_app_route(rel_fname):
+            return False
+
         if any(part in self._test_dir_names for part in parts[:-1]):
             return True
 
@@ -719,6 +723,18 @@ class RepoMap:
             or stem.startswith("test_")
             or stem.endswith("_test")
             or stem.endswith("_spec")
+        )
+
+    def _looks_like_next_app_route(self, rel_fname: str) -> bool:
+        """Detect Next.js-style app router endpoints like app/api/*/route.ts."""
+        normalized = self._normalize_rel_path(rel_fname).lower()
+        path = Path(normalized)
+        basename = path.name
+        parent_parts = [part.lower() for part in path.parts[:-1]]
+        return (
+            basename in {"route.ts", "route.tsx", "route.js", "route.jsx"}
+            and "app" in parent_parts
+            and "api" in parent_parts
         )
 
     def _candidate_related_test_paths(self, rel_fname: str) -> List[str]:
@@ -785,6 +801,8 @@ class RepoMap:
             public_api_signals.append("public_api_filename")
         if any(part in self._public_api_dir_names for part in parent_parts):
             public_api_signals.append("public_api_directory")
+        if self._looks_like_next_app_route(rel_fname):
+            public_api_signals.append("public_api_next_route")
 
         return entrypoint_signals, public_api_signals
 
