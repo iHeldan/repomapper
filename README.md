@@ -81,6 +81,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
 - File tracing and impact analysis now understand TS/JS import + re-export chains and Python package boundaries, not just raw same-name references
+- Repo-local `.repomapper.toml` files can now scope the repository view, mark extra important files, extend framework/test signals, and tune ranking weights without changing the CLI or MCP payload shape
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first
 - Impact analysis also emits a smaller `quick_actions` lane for low-risk next steps such as opening the closest changed boundary, running a nearby test, or checking a config assumption
@@ -201,6 +202,46 @@ When using `--impact-from` or `--impact-changed`, the CLI switches to impact-ana
 - or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `test_clusters` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, per-target `symbol_path`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
 
 If you pass `--edit-plan`, text output switches to a compact edit-oriented view that prioritizes the first few high-signal next steps, along with their best concrete edit candidates.
+
+### Repository config
+
+If the repo root contains a `.repomapper.toml`, RepoMapper loads it automatically and applies it to map, trace, and impact workflows.
+
+Example:
+
+```toml
+include = ["src/**", "tests/**", "package.json"]
+exclude = ["src/generated/**", "dist/**"]
+important_files = ["ops/*.conf", "contracts/**"]
+
+[frameworks]
+entrypoint_files = ["boot.py", "worker.ts"]
+entrypoint_dirs = ["services"]
+public_api_files = ["exports.ts"]
+public_api_dirs = ["exports", "contracts"]
+
+[tests]
+dirs = ["checks", "integration"]
+integration_markers = ["contract", "scenario"]
+python_runner = "pytest"
+js_runner = "vitest"
+
+[ranking_weights]
+query = 1.0
+entrypoint = 1.25
+public_api = 1.1
+changed_file = 1.0
+changed_neighbor = 0.8
+related_test = 1.2
+```
+
+Supported config knobs:
+
+- `include` / `exclude`: repository-relative glob patterns that scope the files considered by ranking, tracing, and impact analysis
+- `important_files`: extra docs/config/contracts that should stay visible even without parser-extracted symbols
+- `[frameworks]`: additional entrypoint/public API filenames and directory signals
+- `[tests]`: extra test directories, extra integration markers, and optional runner overrides for `pytest`, `vitest`, `jest`, or `mocha`
+- `[ranking_weights]`: non-negative multipliers that tune how strongly query matches, changed files, related tests, entrypoints, public APIs, chat files, mentioned files, and mentioned identifiers affect ranking
 
 ### MCP Server
 

@@ -869,6 +869,107 @@ class RepoMapRankingTests(unittest.TestCase):
         self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", None), "neighbor")
 
 
+class RepoMapConfigTests(unittest.TestCase):
+    def test_repo_config_scopes_files_and_keeps_custom_important_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            service_file = root / "service.py"
+            config_note = root / "ops" / "deploy.conf"
+            excluded_file = root / "generated" / "artifact.py"
+            config_note.parent.mkdir(parents=True, exist_ok=True)
+            excluded_file.parent.mkdir(parents=True, exist_ok=True)
+            service_file.write_text("def service():\n    return 1\n", encoding="utf-8")
+            config_note.write_text("rollout = blue\n", encoding="utf-8")
+            excluded_file.write_text("def generated():\n    return 0\n", encoding="utf-8")
+            (root / ".repomapper.toml").write_text(
+                'include = ["service.py", "ops/**", "generated/**"]\n'
+                'exclude = ["generated/**"]\n'
+                'important_files = ["ops/*.conf"]\n',
+                encoding="utf-8",
+            )
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: [Tag(rel_fname, fname, 1, "service", "def")] if rel_fname == "service.py" else []
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                find_src_files(str(root)),
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertIn("service.py", by_path)
+            self.assertIn("ops/deploy.conf", by_path)
+            self.assertTrue(by_path["ops/deploy.conf"].is_important_file)
+            self.assertIn(str(excluded_file), file_report.excluded)
+            self.assertIn("Matched configured exclude pattern", file_report.excluded[str(excluded_file)])
+            self.assertIn("ops/deploy.conf:", map_content)
+
+    def test_repo_config_extends_role_and_test_signals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / ".repomapper.toml").write_text(
+                "[frameworks]\n"
+                'entrypoint_files = ["boot.py"]\n'
+                'public_api_dirs = ["exports"]\n'
+                "\n"
+                "[tests]\n"
+                'dirs = ["checks"]\n'
+                'integration_markers = ["contract"]\n'
+                'python_runner = "pytest"\n'
+                'js_runner = "jest"\n',
+                encoding="utf-8",
+            )
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+
+            self.assertTrue(repo_map._is_test_file("checks/service_case.py"))
+            self.assertTrue(repo_map._is_integration_test_path("checks/contract/service_case.py"))
+            self.assertEqual(
+                repo_map._get_path_role_signals("packages/worker/boot.py")[0],
+                ["entrypoint_filename"],
+            )
+            self.assertEqual(
+                repo_map._get_path_role_signals("exports/root.ts")[1],
+                ["public_api_directory"],
+            )
+            self.assertEqual(repo_map._suggest_test_command("checks/service_case.py"), "pytest checks/service_case.py")
+            self.assertEqual(repo_map._suggest_test_command("web/example.test.ts"), "npx jest web/example.test.ts")
+
+    def test_repo_config_query_weight_can_disable_query_boost(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            adapter_file = root / "adapter.py"
+            consumer_file = root / "consumer.py"
+            core_file = root / "core.py"
+            for path in (adapter_file, consumer_file, core_file):
+                path.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "adapter.py": [Tag("adapter.py", str(adapter_file), 1, "Adapter", "def")],
+                "consumer.py": [Tag("consumer.py", str(consumer_file), 1, "Core", "ref")],
+                "core.py": [Tag("core.py", str(core_file), 1, "Core", "def")],
+            }
+            files = [str(adapter_file), str(consumer_file), str(core_file)]
+
+            default_repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            default_repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+            default_ranked_tags, _ = default_repo_map.get_ranked_tags([], files, query="adapter")
+            default_ranks = {tag.rel_fname: rank for rank, tag in default_ranked_tags}
+
+            (root / ".repomapper.toml").write_text(
+                "[ranking_weights]\nquery = 0\n",
+                encoding="utf-8",
+            )
+            weighted_repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            weighted_repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+            weighted_ranked_tags, _ = weighted_repo_map.get_ranked_tags([], files, query="adapter")
+            weighted_ranks = {tag.rel_fname: rank for rank, tag in weighted_ranked_tags}
+
+            self.assertGreater(default_ranks["adapter.py"], default_ranks["core.py"])
+            self.assertGreater(weighted_ranks["core.py"], weighted_ranks["adapter.py"])
+
+
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
         repomap_server._REPO_MAP_CACHE.clear()

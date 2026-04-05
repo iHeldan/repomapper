@@ -20,6 +20,7 @@ from utils import count_tokens, read_text, find_src_files
 from scm import get_scm_fname
 from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
+from repomap_config import load_repo_map_config
 from repomap_semantics import collect_semantic_links, SemanticLink
 
 try:
@@ -392,6 +393,16 @@ class RepoMap:
         self.diagnostics = []
         self.file_summary_by_file = {}
         self.file_summary_kind_by_file = {}
+        self.repo_config = load_repo_map_config(self.root, self.read_text_func_internal)
+        self._test_dir_names = TEST_DIR_NAMES | set(self.repo_config.tests.dirs)
+        self._candidate_test_dir_names = self._dedupe_preserve_order(
+            ["tests", "test", "__tests__", "spec", "specs"] + list(self.repo_config.tests.dirs)
+        )
+        self._integration_test_markers = INTEGRATION_TEST_MARKERS | set(self.repo_config.tests.integration_markers)
+        self._entrypoint_filenames = ENTRYPOINT_FILENAMES | set(self.repo_config.frameworks.entrypoint_files)
+        self._entrypoint_dir_names = ENTRYPOINT_DIR_NAMES | set(self.repo_config.frameworks.entrypoint_dirs)
+        self._public_api_filenames = PUBLIC_API_FILENAMES | set(self.repo_config.frameworks.public_api_files)
+        self._public_api_dir_names = PUBLIC_API_DIR_NAMES | set(self.repo_config.frameworks.public_api_dirs)
 
         # Load persistent tags cache
         self.load_tags_cache()
@@ -501,6 +512,54 @@ class RepoMap:
         if message not in self.diagnostics:
             self.diagnostics.append(message)
 
+    def _reset_request_state(self):
+        """Reset per-request caches while retaining repo-config diagnostics."""
+        self.diagnostics = list(self.repo_config.diagnostics)
+        self._tag_failures = {}
+        self._uncacheable_tag_failures = set()
+
+    def _get_scope_exclusion_reason(self, rel_fname: str) -> Optional[str]:
+        """Return a repo-config scope exclusion reason, if any."""
+        return self.repo_config.scope_reason(self._normalize_rel_path(rel_fname))
+
+    def _prepare_candidate_files(
+        self,
+        fnames: List[str],
+        excluded: Optional[Dict[str, str]] = None,
+    ) -> List[str]:
+        """Normalize, de-duplicate, and scope-filter candidate files."""
+        scoped_fnames = []
+        seen = set()
+        for fname in fnames:
+            abs_fname = os.path.abspath(fname)
+            if abs_fname in seen:
+                continue
+            seen.add(abs_fname)
+
+            if not os.path.exists(abs_fname):
+                if excluded is not None:
+                    excluded[abs_fname] = "File not found"
+                continue
+
+            rel_fname = self.get_rel_fname(abs_fname)
+            scope_reason = self._get_scope_exclusion_reason(rel_fname)
+            if scope_reason:
+                if excluded is not None:
+                    excluded[abs_fname] = scope_reason
+                continue
+
+            scoped_fnames.append(abs_fname)
+        return scoped_fnames
+
+    def _find_repo_files(self) -> List[str]:
+        """Find repository files and apply configured include/exclude patterns."""
+        return self._prepare_candidate_files(find_src_files(str(self.root)))
+
+    def _is_important_file(self, rel_fname: str) -> bool:
+        """Check built-in and repo-config important-file signals."""
+        normalized = self._normalize_rel_path(rel_fname)
+        return is_important(normalized) or self.repo_config.is_configured_important_file(normalized)
+
     def _record_tag_failure(self, fname: str, message: str, *, cacheable: bool):
         """Remember a per-file parse failure and whether it may be cached."""
         self._tag_failures[fname] = message
@@ -536,12 +595,13 @@ class RepoMap:
     ) -> float:
         """Apply the standard rank boosts for a file/tag pair."""
         boost = 1.0
+        weights = self.repo_config.ranking_weights
         if tag_name in mentioned_idents:
-            boost *= 10.0
+            boost *= self._scale_multiplier(10.0, weights.mentioned_identifier)
         if rel_fname in mentioned_fnames:
-            boost *= 5.0
+            boost *= self._scale_multiplier(5.0, weights.mentioned_file)
         if rel_fname in chat_rel_fnames:
-            boost *= 20.0
+            boost *= self._scale_multiplier(20.0, weights.chat_file)
         boost *= query_boost
         return file_rank * boost
 
@@ -562,6 +622,16 @@ class RepoMap:
         """Normalize relative paths to a forward-slash form for matching heuristics."""
         return Path(rel_fname).as_posix()
 
+    @staticmethod
+    def _scale_multiplier(base_multiplier: float, weight: float) -> float:
+        """Scale an existing >1.0 multiplier with a user-configurable weight."""
+        return 1.0 + max(base_multiplier - 1.0, 0.0) * max(weight, 0.0)
+
+    @staticmethod
+    def _scale_floor(base_floor: float, weight: float) -> float:
+        """Scale a non-negative ranking floor with a user-configurable weight."""
+        return max(base_floor, 0.0) * max(weight, 0.0)
+
     def _is_test_file(self, rel_fname: str) -> bool:
         """Heuristically detect whether a file is a test/spec file."""
         normalized = self._normalize_rel_path(rel_fname).lower()
@@ -569,7 +639,7 @@ class RepoMap:
         basename = parts[-1]
         stem = Path(basename).stem.lower()
 
-        if any(part in TEST_DIR_NAMES for part in parts[:-1]):
+        if any(part in self._test_dir_names for part in parts[:-1]):
             return True
 
         return (
@@ -604,15 +674,11 @@ class RepoMap:
 
         candidate_dirs = [
             parent_parts,
-            parent_parts + ["tests"],
-            parent_parts + ["test"],
-            parent_parts + ["__tests__"],
-            parent_parts + ["spec"],
-            ["tests"] + source_relative_parts,
-            ["test"] + source_relative_parts,
-            ["__tests__"] + source_relative_parts,
-            ["spec"] + source_relative_parts,
         ]
+        for test_dir_name in self._candidate_test_dir_names:
+            candidate_dirs.append(parent_parts + [test_dir_name])
+        for test_dir_name in self._candidate_test_dir_names:
+            candidate_dirs.append([test_dir_name] + source_relative_parts)
 
         candidates = []
         for dir_parts in candidate_dirs:
@@ -641,14 +707,14 @@ class RepoMap:
         entrypoint_signals = []
         public_api_signals = []
 
-        if basename in ENTRYPOINT_FILENAMES:
+        if basename in self._entrypoint_filenames:
             entrypoint_signals.append("entrypoint_filename")
-        if any(part in ENTRYPOINT_DIR_NAMES for part in parent_parts):
+        if any(part in self._entrypoint_dir_names for part in parent_parts):
             entrypoint_signals.append("entrypoint_directory")
 
-        if basename in PUBLIC_API_FILENAMES:
+        if basename in self._public_api_filenames:
             public_api_signals.append("public_api_filename")
-        if any(part in PUBLIC_API_DIR_NAMES for part in parent_parts):
+        if any(part in self._public_api_dir_names for part in parent_parts):
             public_api_signals.append("public_api_directory")
 
         return entrypoint_signals, public_api_signals
@@ -711,13 +777,18 @@ class RepoMap:
         """Return rank floor and boost for entrypoint/public API files."""
         boost = 1.0
         rank_floor = 0.0
+        weights = self.repo_config.ranking_weights
 
         if entrypoint_signals:
-            boost *= min(1.5 + (0.15 * max(len(entrypoint_signals) - 1, 0)), 2.0)
-            rank_floor = max(rank_floor, 0.05 + (0.01 * min(len(entrypoint_signals), 3)))
+            entrypoint_boost = min(1.5 + (0.15 * max(len(entrypoint_signals) - 1, 0)), 2.0)
+            entrypoint_floor = 0.05 + (0.01 * min(len(entrypoint_signals), 3))
+            boost *= self._scale_multiplier(entrypoint_boost, weights.entrypoint)
+            rank_floor = max(rank_floor, self._scale_floor(entrypoint_floor, weights.entrypoint))
         if public_api_signals:
-            boost *= min(1.3 + (0.1 * max(len(public_api_signals) - 1, 0)), 1.8)
-            rank_floor = max(rank_floor, 0.035 + (0.005 * min(len(public_api_signals), 3)))
+            public_api_boost = min(1.3 + (0.1 * max(len(public_api_signals) - 1, 0)), 1.8)
+            public_api_floor = 0.035 + (0.005 * min(len(public_api_signals), 3))
+            boost *= self._scale_multiplier(public_api_boost, weights.public_api)
+            rank_floor = max(rank_floor, self._scale_floor(public_api_floor, weights.public_api))
 
         return rank_floor, boost
 
@@ -725,11 +796,21 @@ class RepoMap:
         """Return rank floor and boost for changed files and their nearby impact neighbors."""
         if changed_distance is None:
             return 0.0, 1.0
+        weights = self.repo_config.ranking_weights
         if changed_distance == 0:
-            return 0.08, 8.0
+            return (
+                self._scale_floor(0.08, weights.changed_file),
+                self._scale_multiplier(8.0, weights.changed_file),
+            )
         if changed_distance == 1:
-            return 0.03, 2.5
-        return 0.015, max(1.25, 2.25 - (0.25 * changed_distance))
+            return (
+                self._scale_floor(0.03, weights.changed_neighbor),
+                self._scale_multiplier(2.5, weights.changed_neighbor),
+            )
+        return (
+            self._scale_floor(0.015, weights.changed_neighbor),
+            self._scale_multiplier(max(1.25, 2.25 - (0.25 * changed_distance)), weights.changed_neighbor),
+        )
 
     @staticmethod
     def _shorten_summary_value(value: str, limit: int = 80) -> str:
@@ -1136,12 +1217,10 @@ class RepoMap:
         max_hops: int = 6,
     ) -> ConnectionReport:
         """Find a shortest file-level path between two files using the repo graph."""
-        self.diagnostics = []
-        self._tag_failures = {}
-        self._uncacheable_tag_failures = set()
+        self._reset_request_state()
 
-        candidate_files = files or find_src_files(str(self.root))
-        all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in candidate_files))
+        candidate_files = files or self._find_repo_files()
+        all_fnames = self._prepare_candidate_files(candidate_files)
         abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
 
         start_abs = os.path.abspath(start_file)
@@ -1478,9 +1557,7 @@ class RepoMap:
         changed_lines_by_file: Optional[Dict[str, List[int]]] = None,
     ) -> ImpactReport:
         """Find nearby repository files most likely to be affected by the given seed files."""
-        self.diagnostics = []
-        self._tag_failures = {}
-        self._uncacheable_tag_failures = set()
+        self._reset_request_state()
 
         seed_files = list(dict.fromkeys(seed_files or []))
         resolved_seed_files = [self.get_rel_fname(os.path.abspath(seed_file)) for seed_file in seed_files]
@@ -1500,8 +1577,8 @@ class RepoMap:
             report.error = "max_results must be at least 1."
             return report
 
-        candidate_files = files or find_src_files(str(self.root))
-        all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in candidate_files))
+        candidate_files = files or self._find_repo_files()
+        all_fnames = self._prepare_candidate_files(candidate_files)
         abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
         rel_to_abs = {rel_fname: fname for fname, rel_fname in abs_to_rel.items()}
         changed_lines_by_rel = {}
@@ -1629,7 +1706,7 @@ class RepoMap:
             entrypoint_signals, public_api_signals = self._get_path_role_signals(target_rel)
             is_entrypoint_file = bool(entrypoint_signals)
             is_public_api_file = bool(public_api_signals)
-            is_important_file = is_important(target_rel)
+            is_important_file = self._is_important_file(target_rel)
             summary_kind, summary_items = self._extract_file_summary(target_abs, target_rel)
 
             relations_preview = " -> ".join(step.relation for step in steps[:4])
@@ -2174,11 +2251,11 @@ class RepoMap:
         """Detect tests that look broader than a direct sibling/unit test."""
         normalized = self._normalize_rel_path(rel_path).lower()
         path = Path(normalized)
-        if any(part in INTEGRATION_TEST_MARKERS for part in path.parts):
+        if any(part in self._integration_test_markers for part in path.parts):
             return True
 
         stem = path.stem
-        return any(marker in stem for marker in INTEGRATION_TEST_MARKERS)
+        return any(marker in stem for marker in self._integration_test_markers)
 
     def _suggest_test_cluster_command(self, rel_paths: List[str]) -> Optional[str]:
         """Suggest a runner command for a small group of related test files."""
@@ -2563,13 +2640,28 @@ class RepoMap:
             "If it does not, step back and inspect the next prioritized action.",
         )
 
+    def _read_root_file(self, rel_path: str) -> Optional[str]:
+        """Read a root-level project file if it exists."""
+        abs_path = self.root / rel_path
+        if not abs_path.is_file():
+            return None
+        return self.read_text_func_internal(str(abs_path))
+
+    def _get_python_test_runner(self) -> Optional[str]:
+        """Return the configured or inferred Python test runner."""
+        if self.repo_config.tests.python_runner:
+            return self.repo_config.tests.python_runner
+        if self._uses_pytest():
+            return "pytest"
+        return None
+
     def _suggest_test_command(self, rel_path: str) -> Optional[str]:
         """Suggest a concrete test command when the repository gives a clear enough signal."""
         suffix = Path(rel_path).suffix.lower()
         quoted_path = shlex.quote(rel_path)
 
         if suffix == ".py":
-            if self._uses_pytest():
+            if self._get_python_test_runner() == "pytest":
                 return f"pytest {quoted_path}"
             return None
 
@@ -2584,15 +2676,11 @@ class RepoMap:
 
         return None
 
-    def _read_root_file(self, rel_path: str) -> Optional[str]:
-        """Read a root-level project file if it exists."""
-        abs_path = self.root / rel_path
-        if not abs_path.is_file():
-            return None
-        return self.read_text_func_internal(str(abs_path))
-
     def _uses_pytest(self) -> bool:
         """Infer whether pytest is the project's Python test runner."""
+        if self.repo_config.tests.python_runner:
+            return self.repo_config.tests.python_runner == "pytest"
+
         pyproject_text = self._read_root_file("pyproject.toml")
         if pyproject_text and tomllib is not None:
             try:
@@ -2624,6 +2712,9 @@ class RepoMap:
 
     def _detect_js_test_runner(self) -> Optional[str]:
         """Infer the dominant JS/TS test runner from package.json metadata."""
+        if self.repo_config.tests.js_runner:
+            return self.repo_config.tests.js_runner
+
         package_text = self._read_root_file("package.json")
         if not package_text:
             return None
@@ -2866,10 +2957,14 @@ class RepoMap:
         if not path_matches and not symbol_matches:
             return file_rank, 1.0
 
-        query_floor = (0.02 * len(path_matches)) + (0.05 * len(symbol_matches))
-        path_boost = 1.0 + (0.75 * len(path_matches))
-        symbol_boost = 1.0 + (1.25 * len(symbol_matches))
-        query_boost = min(path_boost * symbol_boost, 8.0)
+        query_weight = self.repo_config.ranking_weights.query
+        query_floor = self._scale_floor(
+            (0.02 * len(path_matches)) + (0.05 * len(symbol_matches)),
+            query_weight,
+        )
+        path_boost = 1.0 + (0.75 * len(path_matches) * max(query_weight, 0.0))
+        symbol_boost = 1.0 + (1.25 * len(symbol_matches) * max(query_weight, 0.0))
+        query_boost = min(path_boost * symbol_boost, self._scale_multiplier(8.0, query_weight))
         return max(file_rank, query_floor), query_boost
 
     def _build_file_reasons(
@@ -3225,6 +3320,8 @@ class RepoMap:
         query: Optional[str] = None,
     ) -> Tuple[List[Tuple[float, Tag]], FileReport]:
         """Get ranked tags using PageRank algorithm with file report."""
+        self._reset_request_state()
+
         # Return empty list and empty report if no files
         if not chat_fnames and not other_fnames:
             return [], FileReport(
@@ -3232,6 +3329,7 @@ class RepoMap:
                 0,
                 0,
                 0,
+                list(self.diagnostics),
                 query=query,
                 query_terms=self._extract_query_terms(query),
                 changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
@@ -3247,9 +3345,9 @@ class RepoMap:
         changed_neighbor_depth = max(0, changed_neighbor_depth)
         query_terms = self._extract_query_terms(query)
 
-        chat_fnames = [os.path.abspath(f) for f in chat_fnames]
-        other_fnames = [os.path.abspath(f) for f in other_fnames]
-        changed_fnames = {os.path.abspath(f) for f in changed_fnames}
+        raw_chat_fnames = [os.path.abspath(f) for f in chat_fnames]
+        raw_other_fnames = [os.path.abspath(f) for f in other_fnames]
+        raw_changed_fnames = {os.path.abspath(f) for f in changed_fnames}
 
         included: List[str] = []
         excluded: Dict[str, str] = {}
@@ -3272,9 +3370,13 @@ class RepoMap:
         references = defaultdict(set)
 
         # R4 Finding B1-F2: Pre-compute rel_fname once per file to avoid redundant Path operations
-        all_fnames = list(dict.fromkeys(chat_fnames + other_fnames))
+        raw_all_fnames = list(dict.fromkeys(raw_chat_fnames + raw_other_fnames))
+        all_fnames = self._prepare_candidate_files(raw_all_fnames, excluded)
         abs_to_rel: Dict[str, str] = {f: self.get_rel_fname(f) for f in all_fnames}
         known_rel_fnames = set(abs_to_rel.values())
+        chat_fnames = [fname for fname in raw_chat_fnames if fname in abs_to_rel]
+        other_fnames = [fname for fname in raw_other_fnames if fname in abs_to_rel]
+        changed_fnames = {fname for fname in raw_changed_fnames if fname in abs_to_rel}
         changed_rel_fnames = {abs_to_rel[f] for f in changed_fnames if f in abs_to_rel}
         is_test_file_by_rel = {rel_fname: self._is_test_file(rel_fname) for rel_fname in known_rel_fnames}
         related_tests_by_source = {
@@ -3293,13 +3395,7 @@ class RepoMap:
 
         for fname in all_fnames:
             rel_fname = abs_to_rel[fname]
-            
-            if not os.path.exists(fname):
-                reason = "File not found"
-                excluded[fname] = reason
-                self.output_handlers['warning'](f"Repo-map can't include {fname}: {reason}")
-                continue
-                
+
             included.append(fname)
             
             tags = self.get_tags(fname, rel_fname)
@@ -3322,7 +3418,7 @@ class RepoMap:
                 if tag.name in mentioned_idents:
                     mentioned_identifiers_by_file[rel_fname].add(tag.name)
 
-            if not tags and is_important(rel_fname):
+            if not tags and self._is_important_file(rel_fname):
                 synthetic_tags = self._get_important_file_tags(fname, rel_fname)
                 if synthetic_tags:
                     supplemental_tags_by_file[fname] = synthetic_tags
@@ -3394,7 +3490,7 @@ class RepoMap:
                 excluded,
                 total_definitions,
                 total_references,
-                len(all_fnames),
+                len(raw_all_fnames),
                 list(self.diagnostics),
                 query=query,
                 query_terms=query_terms,
@@ -3418,7 +3514,7 @@ class RepoMap:
             excluded=excluded,
             definition_matches=total_definitions,
             reference_matches=total_references,
-            total_files_considered=len(all_fnames),
+            total_files_considered=len(raw_all_fnames),
             diagnostics=list(self.diagnostics),
             query=query,
             query_terms=query_terms,
@@ -3512,7 +3608,10 @@ class RepoMap:
                     if source_rel_fname in mentioned_fnames:
                         source_support *= 1.5
                     source_support *= min(context_boost_by_file.get(source_rel_fname, 1.0), 2.0)
-                    related_source_support = max(related_source_support, source_support * 0.5)
+                    related_source_support = max(
+                        related_source_support,
+                        source_support * (0.5 * max(self.repo_config.ranking_weights.related_test, 0.0)),
+                    )
                 effective_file_rank = max(effective_file_rank, related_source_support)
 
             # Exclude files with low Page Rank if exclude_unranked is True
@@ -3875,9 +3974,7 @@ class RepoMap:
         if other_files is None:
             other_files = []
 
-        self.diagnostics = []
-        self._tag_failures = {}
-        self._uncacheable_tag_failures = set()
+        self._reset_request_state()
         self.file_summary_by_file = {}
         self.file_summary_kind_by_file = {}
             
@@ -3887,6 +3984,7 @@ class RepoMap:
             0,
             0,
             0,
+            list(self.diagnostics),
             query=query,
             query_terms=self._extract_query_terms(query),
             changed_files=sorted(self.get_rel_fname(f) for f in (changed_fnames or set())),
