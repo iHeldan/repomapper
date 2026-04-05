@@ -518,6 +518,7 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(first_action.anchor_file, "tests/test_service.py")
             self.assertEqual(first_action.anchor_line, 1)
             self.assertEqual(first_action.effort, "small")
+            self.assertEqual(first_action.target_role, "test")
             self.assertEqual(first_action.risk_level, "low")
             self.assertEqual(first_action.confidence, 0.81)
             self.assertEqual(first_action.focus_symbols, ["Service"])
@@ -537,6 +538,15 @@ class RepoMapRankingTests(unittest.TestCase):
             )
             self.assertEqual(first_action.location_hint, "tests/test_service.py:1")
             self.assertEqual(first_action.command_hint, "pytest tests/test_service.py")
+            neighbor_action = next(action for action in report.quick_actions if action.kind == "open_direct_neighbor")
+            self.assertEqual(neighbor_action.target_role, "neighbor")
+            self.assertEqual(report.edit_candidates[0].target_role, "test")
+            self.assertEqual(report.edit_candidates[0].path, "tests/test_service.py")
+            self.assertEqual(report.edit_candidates[0].line, 1)
+            self.assertEqual(report.edit_candidates[0].source_action_kind, "run_nearby_test")
+            self.assertEqual(report.edit_plan[0].title, "Run nearby test")
+            self.assertEqual(report.edit_plan[0].target_role, "test")
+            self.assertEqual(report.edit_plan[0].edit_candidates[0].path, "tests/test_service.py")
             first_suggestion = report.suggested_checks[0]
             self.assertEqual(first_suggestion.anchor_file, "tests/test_service.py")
             self.assertEqual(first_suggestion.anchor_line, 1)
@@ -600,6 +610,7 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.quick_actions[0].focus_symbols, ["Service"])
             self.assertEqual(report.quick_actions[0].focus_reason, "Focused on changed boundary symbols nearest to the seed diff.")
             self.assertEqual(report.quick_actions[0].why_now, "This boundary is only 0 line(s) from the changed hunk.")
+            self.assertEqual(report.quick_actions[0].target_role, "boundary")
             self.assertEqual(
                 report.quick_actions[0].expected_outcome,
                 "Confirm whether this boundary symbol or call site needs a matching update.",
@@ -614,6 +625,13 @@ class RepoMapRankingTests(unittest.TestCase):
             )
             self.assertEqual(report.quick_actions[0].location_hint, "service.py:1")
             self.assertIsNone(report.quick_actions[0].command_hint)
+            self.assertEqual(report.edit_candidates[0].path, "service.py")
+            self.assertEqual(report.edit_candidates[0].target_role, "boundary")
+            self.assertEqual(report.edit_candidates[0].line, 1)
+            self.assertEqual(report.edit_candidates[0].symbol, "Service")
+            self.assertEqual(report.edit_plan[0].title, "Inspect changed boundary")
+            self.assertEqual(report.edit_plan[0].target_role, "boundary")
+            self.assertEqual(report.edit_plan[0].edit_candidates[0].symbol, "Service")
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
             self.assertEqual(report.suggested_checks[0].anchor_file, "service.py")
             self.assertEqual(report.suggested_checks[0].anchor_line, 1)
@@ -659,6 +677,22 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(by_path["service.py"].closest_changed_hunk_distance, 2)
             self.assertEqual(report.shared_symbols[0].name, "Helper")
             self.assertEqual(report.shared_symbols[0].closest_changed_hunk_distance, 1)
+
+    def test_quick_action_target_roles_prioritize_specific_surface_types(self):
+        repo_map = RepoMap(root=".", token_counter_func=lambda text: len(text.split()))
+
+        boundary_target = repomap_class.ImpactTarget(path="service.py", seed_file="app.py", distance=1)
+        test_target = repomap_class.ImpactTarget(path="tests/test_service.py", seed_file="app.py", distance=1, is_test_file=True)
+        config_target = repomap_class.ImpactTarget(path="pyproject.toml", seed_file="app.py", distance=1, summary_kind="config")
+        public_api_target = repomap_class.ImpactTarget(path="api/routes.py", seed_file="app.py", distance=1, is_public_api_file=True)
+        entrypoint_target = repomap_class.ImpactTarget(path="main.py", seed_file="app.py", distance=1, is_entrypoint_file=True)
+
+        self.assertEqual(repo_map._get_quick_action_target_role("open_changed_boundary", boundary_target), "boundary")
+        self.assertEqual(repo_map._get_quick_action_target_role("run_nearby_test", test_target), "test")
+        self.assertEqual(repo_map._get_quick_action_target_role("check_config_assumption", config_target), "config")
+        self.assertEqual(repo_map._get_quick_action_target_role("open_changed_boundary", public_api_target), "public_api")
+        self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", entrypoint_target), "entrypoint")
+        self.assertEqual(repo_map._get_quick_action_target_role("open_direct_neighbor", None), "neighbor")
 
 
 class SearchIdentifierCacheTests(unittest.TestCase):
@@ -1067,6 +1101,7 @@ class CliPathResolutionTests(unittest.TestCase):
                             kind="open_changed_boundary",
                             target="service.py",
                             message="Open this changed boundary first and verify the nearby symbol contract.",
+                            target_role="boundary",
                             risk_level="low",
                             confidence=0.95,
                             focus_symbols=["Service"],
@@ -1084,6 +1119,61 @@ class CliPathResolutionTests(unittest.TestCase):
                             anchor_symbol="Service",
                             anchor_kind="def",
                             anchor_excerpt="1: class Service:\n2:     pass",
+                        )
+                    ],
+                    edit_candidates=[
+                        repomap_class.ImpactEditCandidate(
+                            path="service.py",
+                            target_role="boundary",
+                            reason="Boundary symbol Service is the strongest concrete edit point on this path.",
+                            priority=0,
+                            confidence=0.95,
+                            line=1,
+                            symbol="Service",
+                            symbol_kind="def",
+                            location_hint="service.py:1",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                            source_action_kind="open_changed_boundary",
+                            source_action_target="service.py",
+                        )
+                    ],
+                    edit_plan=[
+                        repomap_class.ImpactEditPlanStep(
+                            step=1,
+                            priority=0,
+                            title="Inspect changed boundary",
+                            instruction="Inspect service.py:1 (Service) as the strongest concrete boundary on this impact path.",
+                            target="service.py",
+                            target_role="boundary",
+                            confidence=0.95,
+                            action_kind="open_changed_boundary",
+                            location_hint="service.py:1",
+                            command_hint=None,
+                            focus_symbols=["Service"],
+                            why_now="This boundary is only 0 line(s) from the changed hunk.",
+                            expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
+                            follow_if_true="If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+                            follow_if_false="If it does not, move to the next closest impacted file or config assumption.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                            edit_candidates=[
+                                repomap_class.ImpactEditCandidate(
+                                    path="service.py",
+                                    target_role="boundary",
+                                    reason="Boundary symbol Service is the strongest concrete edit point on this path.",
+                                    priority=0,
+                                    confidence=0.95,
+                                    line=1,
+                                    symbol="Service",
+                                    symbol_kind="def",
+                                    location_hint="service.py:1",
+                                    seed_file="app.py",
+                                    path_from_seed=["app.py", "service.py"],
+                                    source_action_kind="open_changed_boundary",
+                                    source_action_target="service.py",
+                                )
+                            ],
                         )
                     ],
                     suggested_checks=[
@@ -1148,6 +1238,7 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
             self.assertEqual(payload["quick_actions"][0]["kind"], "open_changed_boundary")
+            self.assertEqual(payload["quick_actions"][0]["target_role"], "boundary")
             self.assertEqual(payload["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(payload["quick_actions"][0]["confidence"], 0.95)
             self.assertEqual(payload["quick_actions"][0]["focus_symbols"], ["Service"])
@@ -1170,11 +1261,125 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["quick_actions"][0]["anchor_file"], "service.py")
             self.assertEqual(payload["quick_actions"][0]["anchor_line"], 1)
             self.assertIn("class Service", payload["quick_actions"][0]["anchor_excerpt"])
+            self.assertEqual(payload["edit_candidates"][0]["target_role"], "boundary")
+            self.assertEqual(payload["edit_candidates"][0]["symbol"], "Service")
+            self.assertEqual(payload["edit_plan"][0]["title"], "Inspect changed boundary")
+            self.assertEqual(payload["edit_plan"][0]["edit_candidates"][0]["location_hint"], "service.py:1")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(payload["suggested_checks"][0]["anchor_line"], 1)
             self.assertIn("class Service", payload["suggested_checks"][0]["anchor_excerpt"])
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_impact_edit_plan_mode_renders_compact_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            app_file.write_text("value = 1\n", encoding="utf-8")
+            service_file.write_text("value = 2\n", encoding="utf-8")
+
+            def fake_analyze_file_impact(self, seed_files, files=None, max_depth=2, max_results=10, changed_lines_by_file=None):
+                return repomap_class.ImpactReport(
+                    seed_files=["app.py"],
+                    max_depth=max_depth,
+                    max_results=max_results,
+                    quick_actions=[
+                        repomap_class.ImpactQuickAction(
+                            priority=0,
+                            kind="open_changed_boundary",
+                            target="service.py",
+                            message="Open this changed boundary first and verify the nearby symbol contract.",
+                            target_role="boundary",
+                            confidence=0.95,
+                            risk_level="low",
+                            location_hint="service.py:1",
+                            expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
+                            follow_if_true="If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+                            follow_if_false="If it does not, move to the next closest impacted file or config assumption.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                        )
+                    ],
+                    edit_candidates=[
+                        repomap_class.ImpactEditCandidate(
+                            path="service.py",
+                            target_role="boundary",
+                            reason="Boundary symbol Service is the strongest concrete edit point on this path.",
+                            priority=0,
+                            confidence=0.95,
+                            line=1,
+                            symbol="Service",
+                            symbol_kind="def",
+                            location_hint="service.py:1",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                            source_action_kind="open_changed_boundary",
+                            source_action_target="service.py",
+                        )
+                    ],
+                    edit_plan=[
+                        repomap_class.ImpactEditPlanStep(
+                            step=1,
+                            priority=0,
+                            title="Inspect changed boundary",
+                            instruction="Inspect service.py:1 (Service) as the strongest concrete boundary on this impact path.",
+                            target="service.py",
+                            target_role="boundary",
+                            confidence=0.95,
+                            action_kind="open_changed_boundary",
+                            location_hint="service.py:1",
+                            expected_outcome="Confirm whether this boundary symbol or call site needs a matching update.",
+                            follow_if_true="If it does need a change, trace outward to callers, tests, and public API edges touching this symbol.",
+                            follow_if_false="If it does not, move to the next closest impacted file or config assumption.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                            edit_candidates=[
+                                repomap_class.ImpactEditCandidate(
+                                    path="service.py",
+                                    target_role="boundary",
+                                    reason="Boundary symbol Service is the strongest concrete edit point on this path.",
+                                    priority=0,
+                                    confidence=0.95,
+                                    line=1,
+                                    symbol="Service",
+                                    symbol_kind="def",
+                                    location_hint="service.py:1",
+                                    seed_file="app.py",
+                                    path_from_seed=["app.py", "service.py"],
+                                    source_action_kind="open_changed_boundary",
+                                    source_action_target="service.py",
+                                )
+                            ],
+                        )
+                    ],
+                    diagnostics=["Found 1 impacted file."],
+                )
+
+            with mock.patch.object(repomap.RepoMap, "analyze_file_impact", new=fake_analyze_file_impact):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "repomap.py",
+                        "--root",
+                        str(root),
+                        "--impact-from",
+                        "app.py",
+                        "--edit-plan",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            output = stdout.getvalue()
+            self.assertIn("Edit plan from: app.py", output)
+            self.assertIn("1. [boundary] Inspect changed boundary (0.95)", output)
+            self.assertIn("Do: Inspect service.py:1 (Service) as the strongest concrete boundary on this impact path.", output)
+            self.assertIn("Candidate: service.py:1 (Service)", output)
             self.assertEqual(stderr.getvalue(), "")
 
     def test_cli_impact_changed_uses_git_seeds_without_narrowing_scope(self):
@@ -1391,6 +1596,7 @@ class RepoMapServerTests(unittest.TestCase):
                             kind="run_nearby_test",
                             target="tests/test_app.py",
                             message="Run or inspect this nearby test before making broader edits.",
+                            target_role="test",
                             risk_level="low",
                             confidence=0.86,
                             focus_symbols=["Service"],
@@ -1408,6 +1614,57 @@ class RepoMapServerTests(unittest.TestCase):
                             anchor_symbol="Service",
                             anchor_kind="def",
                             anchor_excerpt="1: class Service:\n2:     pass",
+                        )
+                    ],
+                    edit_candidates=[
+                        repomap_class.ImpactEditCandidate(
+                            path="tests/test_app.py",
+                            target_role="test",
+                            reason="Closest validation file covering the impact path from app.py.",
+                            priority=0,
+                            confidence=0.86,
+                            line=1,
+                            location_hint="tests/test_app.py:1",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "tests/test_app.py"],
+                            source_action_kind="run_nearby_test",
+                            source_action_target="tests/test_app.py",
+                        )
+                    ],
+                    edit_plan=[
+                        repomap_class.ImpactEditPlanStep(
+                            step=1,
+                            priority=0,
+                            title="Run nearby test",
+                            instruction="Validate the impact trail in tests/test_app.py:1 before editing deeper code.",
+                            target="tests/test_app.py",
+                            target_role="test",
+                            confidence=0.86,
+                            action_kind="run_nearby_test",
+                            location_hint="tests/test_app.py:1",
+                            command_hint="pytest tests/test_app.py",
+                            focus_symbols=["Service"],
+                            why_now="This is the fastest validation signal close to app.py.",
+                            expected_outcome="Confirm whether the nearby test already passes or pinpoints the broken behavior.",
+                            follow_if_true="If it fails, follow the failing assertion or stack trace to the impacted boundary immediately.",
+                            follow_if_false="If it passes, continue with the nearest non-test impact boundary or direct neighbor.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "tests/test_app.py"],
+                            edit_candidates=[
+                                repomap_class.ImpactEditCandidate(
+                                    path="tests/test_app.py",
+                                    target_role="test",
+                                    reason="Closest validation file covering the impact path from app.py.",
+                                    priority=0,
+                                    confidence=0.86,
+                                    line=1,
+                                    location_hint="tests/test_app.py:1",
+                                    seed_file="app.py",
+                                    path_from_seed=["app.py", "tests/test_app.py"],
+                                    source_action_kind="run_nearby_test",
+                                    source_action_target="tests/test_app.py",
+                                )
+                            ],
                         )
                     ],
                     suggested_checks=[
@@ -1456,6 +1713,7 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
             self.assertEqual(result["quick_actions"][0]["kind"], "run_nearby_test")
+            self.assertEqual(result["quick_actions"][0]["target_role"], "test")
             self.assertEqual(result["quick_actions"][0]["risk_level"], "low")
             self.assertEqual(result["quick_actions"][0]["confidence"], 0.86)
             self.assertEqual(result["quick_actions"][0]["focus_symbols"], ["Service"])
@@ -1478,6 +1736,10 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["quick_actions"][0]["anchor_file"], "service.py")
             self.assertEqual(result["quick_actions"][0]["anchor_line"], 1)
             self.assertIn("class Service", result["quick_actions"][0]["anchor_excerpt"])
+            self.assertEqual(result["edit_candidates"][0]["target_role"], "test")
+            self.assertEqual(result["edit_candidates"][0]["path"], "tests/test_app.py")
+            self.assertEqual(result["edit_plan"][0]["title"], "Run nearby test")
+            self.assertEqual(result["edit_plan"][0]["edit_candidates"][0]["location_hint"], "tests/test_app.py:1")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(result["suggested_checks"][0]["anchor_line"], 1)

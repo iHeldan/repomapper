@@ -425,7 +425,8 @@ async def analyze_file_impact(
     :param max_depth: Maximum graph distance to consider. Defaults to 2.
     :param max_results: Maximum impacted files to return. Defaults to 10.
     :param download_missing_parsers: If True, attempts to download required parser runtimes before building the graph.
-    :returns: A dictionary containing impacted files, paths, reason metadata, diagnostics, or an error.
+    :returns: A dictionary containing impacted files, quick actions, edit candidates, edit plan steps,
+        reason metadata, diagnostics, or an error.
     """
     if error := _check_project_root(project_root):
         return error

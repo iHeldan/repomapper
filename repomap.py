@@ -171,7 +171,10 @@ def format_impact_report(report) -> str:
         lines.append("")
         lines.append("Quick actions:")
         for action in report.quick_actions:
-            lines.append(f"- [P{action.priority}] ({action.effort}, risk {action.risk_level}, confidence {action.confidence:.2f}) {action.kind} {action.target}: {action.message}")
+            lines.append(
+                f"- [P{action.priority}] ({action.effort}, role {action.target_role}, risk {action.risk_level}, confidence {action.confidence:.2f}) "
+                f"{action.kind} {action.target}: {action.message}"
+            )
             if action.focus_symbols:
                 lines.append(f"  focus: {', '.join(action.focus_symbols[:3])}")
             if action.focus_reason:
@@ -193,6 +196,37 @@ def format_impact_report(report) -> str:
                 lines.append(f"  at {action.anchor_file}:{action.anchor_line}{anchor_suffix}")
             if action.anchor_excerpt:
                 lines.extend(f"    {line}" for line in action.anchor_excerpt.splitlines()[:3])
+
+    if report.edit_candidates:
+        lines.append("")
+        lines.append("Edit candidates:")
+        for candidate in report.edit_candidates:
+            symbol_suffix = f" {candidate.symbol}" if candidate.symbol else ""
+            location = candidate.location_hint or candidate.path
+            lines.append(
+                f"- [P{candidate.priority}] ({candidate.target_role}, confidence {candidate.confidence:.2f}) "
+                f"{location}{symbol_suffix}: {candidate.reason}"
+            )
+
+    if report.edit_plan:
+        lines.append("")
+        lines.append("Edit plan:")
+        for step in report.edit_plan:
+            lines.append(
+                f"{step.step}. [{step.target_role}] {step.title}: {step.instruction}"
+            )
+            if step.command_hint:
+                lines.append(f"   run: {step.command_hint}")
+            elif step.location_hint:
+                lines.append(f"   open: {step.location_hint}")
+            if step.focus_symbols:
+                lines.append(f"   focus: {', '.join(step.focus_symbols[:3])}")
+            if step.expected_outcome:
+                lines.append(f"   expect: {step.expected_outcome}")
+            if step.follow_if_true:
+                lines.append(f"   if yes: {step.follow_if_true}")
+            if step.follow_if_false:
+                lines.append(f"   if no: {step.follow_if_false}")
 
     if report.suggested_checks:
         lines.append("")
@@ -241,6 +275,50 @@ def format_impact_report(report) -> str:
                     for hunk in seed_hunks[:4]
                 )
             lines.append(f"- {seed_file}{line_suffix}{hunk_suffix}: {', '.join(symbols[:6])}")
+
+    if report.diagnostics:
+        lines.append("")
+        lines.append("Diagnostics:")
+        lines.extend(f"- {message}" for message in report.diagnostics)
+    return "\n".join(lines)
+
+
+def format_impact_edit_plan(report) -> str:
+    """Render a compact what-to-edit-next view for impact analysis."""
+    if report.error:
+        return format_impact_report(report)
+
+    lines = [
+        f"Edit plan from: {', '.join(report.seed_files) if report.seed_files else '(none)'}",
+        f"Plan steps: {len(report.edit_plan)}",
+    ]
+
+    if not report.edit_plan:
+        lines.append("")
+        lines.append("No edit plan was generated.")
+    else:
+        for step in report.edit_plan:
+            lines.append("")
+            lines.append(
+                f"{step.step}. [{step.target_role}] {step.title} ({step.confidence:.2f})"
+            )
+            lines.append(f"Do: {step.instruction}")
+            if step.command_hint:
+                lines.append(f"Run: {step.command_hint}")
+            elif step.location_hint:
+                lines.append(f"Open: {step.location_hint}")
+            if step.edit_candidates:
+                primary = step.edit_candidates[0]
+                candidate_suffix = f" ({primary.symbol})" if primary.symbol else ""
+                lines.append(
+                    f"Candidate: {primary.location_hint or primary.path}{candidate_suffix}"
+                )
+            if step.expected_outcome:
+                lines.append(f"Expect: {step.expected_outcome}")
+            if step.follow_if_true:
+                lines.append(f"If yes: {step.follow_if_true}")
+            if step.follow_if_false:
+                lines.append(f"If no: {step.follow_if_false}")
 
     if report.diagnostics:
         lines.append("")
@@ -352,6 +430,12 @@ Examples:
         type=int,
         default=10,
         help="Maximum impacted files to return in impact mode (default: 10)"
+    )
+
+    parser.add_argument(
+        "--edit-plan",
+        action="store_true",
+        help="In impact mode, render a compact what-to-edit-next plan instead of the full report"
     )
     
     parser.add_argument(
@@ -473,6 +557,9 @@ Examples:
     if impact_mode and (args.changed or args.changed_neighbors > 0):
         tool_error("Map-focused changed mode cannot be combined with impact mode. Use --impact-changed and optional --base-ref instead.")
         sys.exit(1)
+    if args.edit_plan and not impact_mode:
+        tool_error("--edit-plan can only be used with --impact-from or --impact-changed.")
+        sys.exit(1)
 
     git_result = None
     changed_files = []
@@ -585,7 +672,7 @@ Examples:
             if args.output_format == "json":
                 print(json.dumps(dataclasses.asdict(impact_report), indent=2))
             else:
-                print(format_impact_report(impact_report))
+                print(format_impact_edit_plan(impact_report) if args.edit_plan else format_impact_report(impact_report))
 
             if impact_report.error:
                 sys.exit(1)

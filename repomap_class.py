@@ -164,6 +164,7 @@ class ImpactQuickAction:
     target: str
     message: str
     effort: str = "small"
+    target_role: str = "boundary"
     risk_level: str = "low"
     confidence: float = 0.5
     focus_symbols: List[str] = field(default_factory=list)
@@ -181,6 +182,45 @@ class ImpactQuickAction:
     anchor_symbol: Optional[str] = None
     anchor_kind: Optional[str] = None
     anchor_excerpt: Optional[str] = None
+
+
+@dataclass
+class ImpactEditCandidate:
+    path: str
+    target_role: str
+    reason: str
+    priority: int = 0
+    confidence: float = 0.5
+    line: Optional[int] = None
+    symbol: Optional[str] = None
+    symbol_kind: Optional[str] = None
+    location_hint: Optional[str] = None
+    seed_file: Optional[str] = None
+    path_from_seed: List[str] = field(default_factory=list)
+    source_action_kind: Optional[str] = None
+    source_action_target: Optional[str] = None
+
+
+@dataclass
+class ImpactEditPlanStep:
+    step: int
+    priority: int
+    title: str
+    instruction: str
+    target: str
+    target_role: str
+    confidence: float = 0.5
+    action_kind: Optional[str] = None
+    location_hint: Optional[str] = None
+    command_hint: Optional[str] = None
+    focus_symbols: List[str] = field(default_factory=list)
+    why_now: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    follow_if_true: Optional[str] = None
+    follow_if_false: Optional[str] = None
+    seed_file: Optional[str] = None
+    path_from_seed: List[str] = field(default_factory=list)
+    edit_candidates: List[ImpactEditCandidate] = field(default_factory=list)
 
 
 @dataclass
@@ -231,6 +271,8 @@ class ImpactReport:
     changed_seed_symbols: Dict[str, List[str]] = field(default_factory=dict)
     shared_symbols: List[ImpactSymbol] = field(default_factory=list)
     quick_actions: List[ImpactQuickAction] = field(default_factory=list)
+    edit_candidates: List[ImpactEditCandidate] = field(default_factory=list)
+    edit_plan: List[ImpactEditPlanStep] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -1516,6 +1558,8 @@ class RepoMap:
         )
         report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
         report.quick_actions = self._build_impact_quick_actions(report.impacted_files, report.suggested_checks)
+        report.edit_candidates = self._build_impact_edit_candidates(report.impacted_files, report.quick_actions)
+        report.edit_plan = self._build_impact_edit_plan(report.quick_actions, report.edit_candidates)
 
         diagnostics = list(self.diagnostics)
         if report.impacted_files:
@@ -1604,6 +1648,320 @@ class RepoMap:
         )
         return symbols[:12]
 
+    def _choose_target_anchor(
+        self,
+        target: ImpactTarget,
+        *,
+        prefer_changed: bool = False,
+        prefer_target_file: bool = True,
+    ) -> Optional[ImpactSnippet]:
+        """Pick the most actionable boundary snippet for a target."""
+        snippets = target.boundary_snippets or []
+        if not snippets:
+            return None
+        if prefer_target_file and not any(snippet.file == target.path for snippet in snippets):
+            return None
+
+        scored = []
+        for index, snippet in enumerate(snippets):
+            score = 0
+            if prefer_changed and snippet.symbol in target.changed_boundary_symbols:
+                score += 4
+            if prefer_target_file and snippet.file == target.path:
+                score += 2
+            if snippet.highlight_line in target.focus_lines:
+                score += 1
+            scored.append((-score, index, snippet))
+
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return scored[0][2] if scored else snippets[0]
+
+    def _build_target_file_anchor(self, target: ImpactTarget) -> Optional[ImpactSnippet]:
+        """Create a file-level anchor when no stronger symbol-level anchor exists."""
+        abs_fname = self.root / target.path
+        text = self.read_text_func_internal(str(abs_fname))
+        if not text:
+            return None
+
+        lines = text.splitlines()
+        if not lines:
+            return None
+
+        highlight_line = target.focus_lines[0] if target.focus_lines else 1
+        highlight_index = min(max(highlight_line - 1, 0), len(lines) - 1)
+        start_index = max(0, highlight_index - 1)
+        end_index = min(len(lines), highlight_index + 2)
+        excerpt = "\n".join(
+            f"{line_no}: {lines[line_no - 1]}"
+            for line_no in range(start_index + 1, end_index + 1)
+        )
+        return ImpactSnippet(
+            file=target.path,
+            start_line=start_index + 1,
+            end_line=end_index,
+            highlight_line=highlight_index + 1,
+            kind="file",
+            symbol=Path(target.path).name,
+            excerpt=excerpt,
+        )
+
+    @staticmethod
+    def _build_action_anchor(action: ImpactQuickAction) -> Optional[ImpactSnippet]:
+        """Convert quick action anchor fields into a snippet-like structure."""
+        if not action.anchor_file or not action.anchor_line:
+            return None
+        symbol = action.anchor_symbol or Path(action.anchor_file).name
+        kind = action.anchor_kind or "file"
+        excerpt = action.anchor_excerpt or ""
+        return ImpactSnippet(
+            file=action.anchor_file,
+            start_line=action.anchor_line,
+            end_line=action.anchor_line,
+            highlight_line=action.anchor_line,
+            kind=kind,
+            symbol=symbol,
+            excerpt=excerpt,
+        )
+
+    @staticmethod
+    def _get_quick_action_target_role(
+        kind: str,
+        target: Optional[ImpactTarget],
+    ) -> str:
+        """Classify the role of the file a quick action points at."""
+        kind_roles = {
+            "run_nearby_test": "test",
+            "check_config_assumption": "config",
+            "open_direct_neighbor": "neighbor",
+        }
+
+        if target:
+            if target.is_test_file:
+                return "test"
+            if target.summary_kind == "config":
+                return "config"
+            if target.is_public_api_file:
+                return "public_api"
+            if target.is_entrypoint_file:
+                return "entrypoint"
+
+        return kind_roles.get(kind, "boundary")
+
+    @staticmethod
+    def _get_target_role_sort_key(target_role: str) -> int:
+        """Keep more actionable code-facing edit roles ahead of generic neighbors."""
+        order = {
+            "boundary": 0,
+            "public_api": 1,
+            "entrypoint": 2,
+            "config": 3,
+            "test": 4,
+            "neighbor": 5,
+        }
+        return order.get(target_role, 9)
+
+    def _describe_edit_candidate(
+        self,
+        action: ImpactQuickAction,
+        target: Optional[ImpactTarget],
+        anchor: Optional[ImpactSnippet],
+    ) -> str:
+        """Explain why a concrete file/symbol is a plausible edit point."""
+        role = action.target_role
+        seed_file = action.seed_file or "the seed file"
+        symbol = None
+        if anchor and anchor.kind != "file":
+            symbol = anchor.symbol
+        elif action.focus_symbols:
+            symbol = action.focus_symbols[0]
+
+        if role == "test":
+            return f"Closest validation file covering the impact path from {seed_file}."
+        if role == "config":
+            return f"Config surface on the impact path from {seed_file} that can invalidate deeper edits quickly."
+        if role == "public_api":
+            return (
+                f"Public API boundary {symbol} is the likeliest contract edit point."
+                if symbol
+                else "Public API surface likely needs a matching contract review."
+            )
+        if role == "entrypoint":
+            return (
+                f"Entrypoint boundary {symbol} is where the changed flow most likely surfaces first."
+                if symbol
+                else "Entrypoint surface likely needs a matching flow review."
+            )
+        if role == "neighbor":
+            return f"One-hop neighbor from {seed_file} that can absorb or rule out the change quickly."
+        if symbol:
+            return f"Boundary symbol {symbol} is the strongest concrete edit point on this path."
+        if target and target.changed_boundary_symbols:
+            return f"Changed boundary from {seed_file} stays active in this file."
+        return f"Most direct impacted boundary reachable from {seed_file}."
+
+    def _build_impact_edit_candidates(
+        self,
+        impacted_files: List[ImpactTarget],
+        quick_actions: List[ImpactQuickAction],
+    ) -> List[ImpactEditCandidate]:
+        """Turn quick actions into concrete file/symbol edit suggestions."""
+        candidates = []
+        seen = set()
+        impacted_by_path = {target.path: target for target in impacted_files}
+
+        def add_candidate(
+            action: ImpactQuickAction,
+            target: Optional[ImpactTarget],
+            anchor: Optional[ImpactSnippet],
+        ) -> None:
+            path = action.target
+            line = None
+            symbol = None
+            symbol_kind = None
+            location_hint = action.location_hint or action.target
+
+            if anchor:
+                path = anchor.file or path
+                line = anchor.highlight_line
+                location_hint = f"{path}:{line}" if line else path
+                if anchor.kind != "file":
+                    symbol = anchor.symbol
+                    symbol_kind = anchor.kind
+
+            key = (path, line, symbol, action.target_role)
+            if key in seen:
+                return
+            seen.add(key)
+
+            candidates.append(
+                ImpactEditCandidate(
+                    path=path,
+                    target_role=action.target_role,
+                    reason=self._describe_edit_candidate(action, target, anchor),
+                    priority=action.priority,
+                    confidence=action.confidence,
+                    line=line,
+                    symbol=symbol,
+                    symbol_kind=symbol_kind,
+                    location_hint=location_hint,
+                    seed_file=action.seed_file,
+                    path_from_seed=action.path_from_seed[:],
+                    source_action_kind=action.kind,
+                    source_action_target=action.target,
+                )
+            )
+
+        for action in quick_actions:
+            target = impacted_by_path.get(action.target)
+            anchor = self._build_action_anchor(action)
+            if target and (not anchor or anchor.file != action.target):
+                anchor = self._choose_target_anchor(
+                    target,
+                    prefer_changed=action.kind == "open_changed_boundary",
+                    prefer_target_file=True,
+                ) or self._build_target_file_anchor(target)
+            add_candidate(action, target, anchor)
+
+        candidates.sort(
+            key=lambda item: (
+                item.priority,
+                -item.confidence,
+                self._get_target_role_sort_key(item.target_role),
+                len(item.path_from_seed),
+                item.path,
+                item.line or 0,
+            )
+        )
+        return candidates[:8]
+
+    def _get_edit_plan_title(self, action: ImpactQuickAction) -> str:
+        """Render a short title for a compact edit-plan step."""
+        if action.target_role == "test":
+            return "Run nearby test"
+        if action.target_role == "config":
+            return "Check config assumption"
+        if action.target_role == "public_api":
+            return "Inspect public API boundary"
+        if action.target_role == "entrypoint":
+            return "Inspect entrypoint boundary"
+        if action.target_role == "neighbor":
+            return "Inspect direct neighbor"
+
+        titles = {
+            "open_changed_boundary": "Inspect changed boundary",
+            "start_here": "Start with anchored boundary",
+        }
+        return titles.get(action.kind, "Inspect impacted boundary")
+
+    def _build_edit_plan_instruction(
+        self,
+        action: ImpactQuickAction,
+        candidate: Optional[ImpactEditCandidate],
+    ) -> str:
+        """Describe the next practical move in edit-oriented language."""
+        candidate_ref = action.location_hint or action.target
+        if candidate:
+            candidate_ref = candidate.location_hint or candidate.path
+            if candidate.symbol:
+                candidate_ref = f"{candidate_ref} ({candidate.symbol})"
+
+        if action.target_role == "test":
+            return f"Validate the impact trail in {candidate_ref} before editing deeper code."
+        if action.target_role == "config":
+            return f"Check {candidate_ref} first so config drift does not send the edit down the wrong branch."
+        if action.target_role == "public_api":
+            return f"Open {candidate_ref} and confirm the exported contract still matches the changed behavior."
+        if action.target_role == "entrypoint":
+            return f"Open {candidate_ref} and confirm the main execution flow still reaches the changed boundary."
+        if action.target_role == "neighbor":
+            return f"Inspect {candidate_ref} as the smallest one-hop file that may need a matching update."
+        return f"Inspect {candidate_ref} as the strongest concrete boundary on this impact path."
+
+    def _build_impact_edit_plan(
+        self,
+        quick_actions: List[ImpactQuickAction],
+        edit_candidates: List[ImpactEditCandidate],
+    ) -> List[ImpactEditPlanStep]:
+        """Project quick actions into a compact what-to-edit-next plan."""
+        candidates_by_action = defaultdict(list)
+        for candidate in edit_candidates:
+            key = (
+                candidate.source_action_kind,
+                candidate.source_action_target,
+                candidate.seed_file,
+            )
+            candidates_by_action[key].append(candidate)
+
+        steps = []
+        for index, action in enumerate(quick_actions[:4], start=1):
+            key = (action.kind, action.target, action.seed_file)
+            step_candidates = candidates_by_action.get(key, [])[:3]
+            primary_candidate = step_candidates[0] if step_candidates else None
+            steps.append(
+                ImpactEditPlanStep(
+                    step=index,
+                    priority=action.priority,
+                    title=self._get_edit_plan_title(action),
+                    instruction=self._build_edit_plan_instruction(action, primary_candidate),
+                    target=action.target,
+                    target_role=action.target_role,
+                    confidence=action.confidence,
+                    action_kind=action.kind,
+                    location_hint=(primary_candidate.location_hint if primary_candidate else action.location_hint),
+                    command_hint=action.command_hint,
+                    focus_symbols=action.focus_symbols[:3],
+                    why_now=action.why_now,
+                    expected_outcome=action.expected_outcome,
+                    follow_if_true=action.follow_if_true,
+                    follow_if_false=action.follow_if_false,
+                    seed_file=action.seed_file,
+                    path_from_seed=action.path_from_seed[:],
+                    edit_candidates=step_candidates,
+                )
+            )
+
+        return steps
+
     def _build_impact_quick_actions(
         self,
         impacted_files: List[ImpactTarget],
@@ -1644,6 +2002,7 @@ class RepoMap:
             )
             confidence = self._score_quick_action_confidence(kind, target)
             focus_symbols, focus_reason = self._select_quick_action_focus(kind, target, suggestion)
+            target_role = self._get_quick_action_target_role(kind, target)
 
             quick_actions.append(
                 ImpactQuickAction(
@@ -1652,6 +2011,7 @@ class RepoMap:
                     target=suggestion.target,
                     message=message,
                     effort=effort,
+                    target_role=target_role,
                     risk_level=risk_level,
                     confidence=confidence,
                     focus_symbols=focus_symbols,
@@ -1969,60 +2329,6 @@ class RepoMap:
         suggestions = []
         seen = set()
 
-        def choose_anchor(
-            target: ImpactTarget,
-            *,
-            prefer_changed: bool = False,
-            prefer_target_file: bool = True,
-        ) -> Optional[ImpactSnippet]:
-            snippets = target.boundary_snippets or []
-            if not snippets:
-                return None
-            if prefer_target_file and not any(snippet.file == target.path for snippet in snippets):
-                return None
-
-            scored = []
-            for index, snippet in enumerate(snippets):
-                score = 0
-                if prefer_changed and snippet.symbol in target.changed_boundary_symbols:
-                    score += 4
-                if prefer_target_file and snippet.file == target.path:
-                    score += 2
-                if snippet.highlight_line in target.focus_lines:
-                    score += 1
-                scored.append((-score, index, snippet))
-
-            scored.sort(key=lambda item: (item[0], item[1]))
-            return scored[0][2] if scored else snippets[0]
-
-        def build_target_file_anchor(target: ImpactTarget) -> Optional[ImpactSnippet]:
-            abs_fname = self.root / target.path
-            text = self.read_text_func_internal(str(abs_fname))
-            if not text:
-                return None
-
-            lines = text.splitlines()
-            if not lines:
-                return None
-
-            highlight_line = target.focus_lines[0] if target.focus_lines else 1
-            highlight_index = min(max(highlight_line - 1, 0), len(lines) - 1)
-            start_index = max(0, highlight_index - 1)
-            end_index = min(len(lines), highlight_index + 2)
-            excerpt = "\n".join(
-                f"{line_no}: {lines[line_no - 1]}"
-                for line_no in range(start_index + 1, end_index + 1)
-            )
-            return ImpactSnippet(
-                file=target.path,
-                start_line=start_index + 1,
-                end_line=end_index,
-                highlight_line=highlight_index + 1,
-                kind="file",
-                symbol=Path(target.path).name,
-                excerpt=excerpt,
-            )
-
         def add_suggestion(
             priority: int,
             kind: str,
@@ -2061,7 +2367,7 @@ class RepoMap:
                     f"Review or run this nearby test for changes around {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target) or build_target_file_anchor(target),
+                    anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                 )
             if target.is_public_api_file:
                 add_suggestion(
@@ -2071,7 +2377,7 @@ class RepoMap:
                     f"Check whether the public API contract exposed by {target.path} changed.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target),
+                    anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                 )
             if target.is_entrypoint_file:
                 add_suggestion(
@@ -2081,7 +2387,7 @@ class RepoMap:
                     f"Verify the main execution flow still reaches {target.path} correctly.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target),
+                    anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                 )
             if target.summary_kind == "config":
                 add_suggestion(
@@ -2091,7 +2397,7 @@ class RepoMap:
                     f"Inspect this config file because it sits on the impact path from {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target),
+                    anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                 )
             elif target.summary_kind == "doc":
                 add_suggestion(
@@ -2101,7 +2407,7 @@ class RepoMap:
                     f"Check this documentation file for setup or workflow assumptions around {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target, prefer_target_file=False),
+                    anchor=self._choose_target_anchor(target, prefer_target_file=False) or self._build_target_file_anchor(target),
                 )
             if target.distance == 1 and not target.is_test_file:
                 add_suggestion(
@@ -2111,7 +2417,7 @@ class RepoMap:
                     f"Inspect this direct neighbor because it is one hop away from {target.seed_file}.",
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target),
+                    anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                 )
             if target.steps and any(step.symbols for step in target.steps):
                 if target.boundary_symbols:
@@ -2122,7 +2428,7 @@ class RepoMap:
                         f"Trace shared symbols such as {', '.join(target.boundary_symbols[:3])}.",
                         seed_file=target.seed_file,
                         path_from_seed=target.path_from_seed,
-                        anchor=choose_anchor(target),
+                        anchor=self._choose_target_anchor(target) or self._build_target_file_anchor(target),
                     )
             if target.changed_boundary_symbols:
                 add_suggestion(
@@ -2139,7 +2445,7 @@ class RepoMap:
                     ),
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
-                    anchor=choose_anchor(target, prefer_changed=True),
+                    anchor=self._choose_target_anchor(target, prefer_changed=True) or self._build_target_file_anchor(target),
                 )
 
         if not suggestions and impacted_files:
@@ -2151,7 +2457,7 @@ class RepoMap:
                 f"Start with the closest impacted file on the path from {first_target.seed_file}.",
                 seed_file=first_target.seed_file,
                 path_from_seed=first_target.path_from_seed,
-                anchor=choose_anchor(first_target),
+                anchor=self._choose_target_anchor(first_target) or self._build_target_file_anchor(first_target),
             )
 
         suggestions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
