@@ -4,6 +4,8 @@ Code intelligence for AI agents. Generates a ranked map of your codebase — fun
 
 Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is based on [Aider's](https://aider.chat/) repo-map). This fork adds Vue/Nuxt SFC support and performance optimizations.
 
+Current release: `0.2.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## What it does
 
 1. **Parses** every source file with Tree-sitter to extract definitions and references
