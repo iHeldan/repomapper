@@ -637,6 +637,71 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.suggested_checks[0].anchor_line, 1)
             self.assertEqual(report.suggested_checks[0].anchor_symbol, "Service")
 
+    def test_analyze_file_impact_groups_test_clusters(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            service_file = root / "service.py"
+            test_dir = root / "tests"
+            integration_dir = test_dir / "integration"
+            test_dir.mkdir()
+            integration_dir.mkdir()
+            sibling_test = test_dir / "test_service.py"
+            nearby_test = test_dir / "test_smoke.py"
+            integration_test = integration_dir / "test_service_flow.py"
+            pyproject_file = root / "pyproject.toml"
+
+            app_file.write_text("def run_app():\n    Service()\n", encoding="utf-8")
+            service_file.write_text("class Service:\n    pass\n", encoding="utf-8")
+            sibling_test.write_text("def test_service():\n    assert True\n", encoding="utf-8")
+            nearby_test.write_text("def test_smoke():\n    Service()\n", encoding="utf-8")
+            integration_test.write_text("def test_service_flow():\n    Service()\n", encoding="utf-8")
+            pyproject_file.write_text("[tool.pytest.ini_options]\naddopts = \"-q\"\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [
+                    Tag("app.py", str(app_file), 1, "run_app", "def"),
+                    Tag("app.py", str(app_file), 2, "Service", "ref"),
+                ],
+                "service.py": [
+                    Tag("service.py", str(service_file), 1, "Service", "def"),
+                ],
+                "test_service.py": [],
+                "test_smoke.py": [
+                    Tag("tests/test_smoke.py", str(nearby_test), 2, "Service", "ref"),
+                ],
+                "test_service_flow.py": [
+                    Tag("tests/integration/test_service_flow.py", str(integration_test), 2, "Service", "ref"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(app_file)],
+                files=[
+                    str(app_file),
+                    str(service_file),
+                    str(sibling_test),
+                    str(nearby_test),
+                    str(integration_test),
+                ],
+                max_depth=3,
+                max_results=8,
+            )
+
+            clusters_by_kind = {cluster.kind: cluster for cluster in report.test_clusters}
+            self.assertEqual(set(clusters_by_kind), {"sibling", "nearby", "integration"})
+            self.assertEqual(clusters_by_kind["sibling"].paths, ["tests/test_service.py"])
+            self.assertEqual(clusters_by_kind["sibling"].covers, ["service.py"])
+            self.assertEqual(clusters_by_kind["sibling"].command_hint, "pytest tests/test_service.py")
+            self.assertEqual(clusters_by_kind["nearby"].paths, ["tests/test_smoke.py"])
+            self.assertEqual(clusters_by_kind["nearby"].focus_symbols, ["Service"])
+            self.assertEqual(clusters_by_kind["nearby"].command_hint, "pytest tests/test_smoke.py")
+            self.assertEqual(clusters_by_kind["integration"].paths, ["tests/integration/test_service_flow.py"])
+            self.assertEqual(clusters_by_kind["integration"].command_hint, "pytest tests/integration/test_service_flow.py")
+
     def test_analyze_file_impact_prefers_targets_closer_to_changed_hunks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -1176,6 +1241,18 @@ class CliPathResolutionTests(unittest.TestCase):
                             ],
                         )
                     ],
+                    test_clusters=[
+                        repomap_class.ImpactTestCluster(
+                            kind="sibling",
+                            seed_file="app.py",
+                            paths=["tests/test_service.py"],
+                            covers=["service.py"],
+                            closest_distance=1,
+                            focus_symbols=["Service"],
+                            command_hint="pytest tests/test_service.py",
+                            reason="Sibling tests closely matched to impacted file(s): service.py.",
+                        )
+                    ],
                     suggested_checks=[
                         repomap_class.ImpactSuggestion(
                             priority=1,
@@ -1265,6 +1342,8 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["edit_candidates"][0]["symbol"], "Service")
             self.assertEqual(payload["edit_plan"][0]["title"], "Inspect changed boundary")
             self.assertEqual(payload["edit_plan"][0]["edit_candidates"][0]["location_hint"], "service.py:1")
+            self.assertEqual(payload["test_clusters"][0]["kind"], "sibling")
+            self.assertEqual(payload["test_clusters"][0]["command_hint"], "pytest tests/test_service.py")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(payload["suggested_checks"][0]["anchor_line"], 1)
@@ -1667,6 +1746,18 @@ class RepoMapServerTests(unittest.TestCase):
                             ],
                         )
                     ],
+                    test_clusters=[
+                        repomap_class.ImpactTestCluster(
+                            kind="nearby",
+                            seed_file="app.py",
+                            paths=["tests/test_app.py"],
+                            covers=[],
+                            closest_distance=1,
+                            focus_symbols=["Service"],
+                            command_hint="pytest tests/test_app.py",
+                            reason="Nearby validation tests in the same impact neighborhood as app.py.",
+                        )
+                    ],
                     suggested_checks=[
                         repomap_class.ImpactSuggestion(
                             priority=0,
@@ -1740,6 +1831,8 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["edit_candidates"][0]["path"], "tests/test_app.py")
             self.assertEqual(result["edit_plan"][0]["title"], "Run nearby test")
             self.assertEqual(result["edit_plan"][0]["edit_candidates"][0]["location_hint"], "tests/test_app.py:1")
+            self.assertEqual(result["test_clusters"][0]["kind"], "nearby")
+            self.assertEqual(result["test_clusters"][0]["command_hint"], "pytest tests/test_app.py")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(result["suggested_checks"][0]["anchor_line"], 1)

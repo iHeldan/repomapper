@@ -228,6 +228,20 @@ def format_impact_report(report) -> str:
             if step.follow_if_false:
                 lines.append(f"   if no: {step.follow_if_false}")
 
+    if report.test_clusters:
+        lines.append("")
+        lines.append("Test clusters:")
+        for cluster in report.test_clusters:
+            lines.append(
+                f"- [{cluster.kind}] {', '.join(cluster.paths[:3])}: {cluster.reason}"
+            )
+            if cluster.covers:
+                lines.append(f"  covers: {', '.join(cluster.covers[:4])}")
+            if cluster.focus_symbols:
+                lines.append(f"  focus: {', '.join(cluster.focus_symbols[:4])}")
+            if cluster.command_hint:
+                lines.append(f"  run: {cluster.command_hint}")
+
     if report.suggested_checks:
         lines.append("")
         lines.append("Suggested checks:")
@@ -319,6 +333,14 @@ def format_impact_edit_plan(report) -> str:
                 lines.append(f"If yes: {step.follow_if_true}")
             if step.follow_if_false:
                 lines.append(f"If no: {step.follow_if_false}")
+
+    if report.test_clusters:
+        lines.append("")
+        lines.append("Test clusters:")
+        for cluster in report.test_clusters:
+            lines.append(f"- [{cluster.kind}] {', '.join(cluster.paths[:3])}")
+            if cluster.command_hint:
+                lines.append(f"  run: {cluster.command_hint}")
 
     if report.diagnostics:
         lines.append("")

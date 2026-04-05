@@ -224,6 +224,18 @@ class ImpactEditPlanStep:
 
 
 @dataclass
+class ImpactTestCluster:
+    kind: str
+    seed_file: str
+    paths: List[str] = field(default_factory=list)
+    covers: List[str] = field(default_factory=list)
+    closest_distance: Optional[int] = None
+    focus_symbols: List[str] = field(default_factory=list)
+    command_hint: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@dataclass
 class ImpactLocation:
     file: str
     line: int
@@ -273,6 +285,7 @@ class ImpactReport:
     quick_actions: List[ImpactQuickAction] = field(default_factory=list)
     edit_candidates: List[ImpactEditCandidate] = field(default_factory=list)
     edit_plan: List[ImpactEditPlanStep] = field(default_factory=list)
+    test_clusters: List[ImpactTestCluster] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -290,6 +303,10 @@ QUERY_STOP_WORDS = {
     "with",
 }
 TEST_DIR_NAMES = {"test", "tests", "__tests__", "spec", "specs"}
+INTEGRATION_TEST_MARKERS = {
+    "acceptance", "e2e", "end_to_end", "feature", "features",
+    "integration", "integrations", "scenario", "scenarios", "system",
+}
 ENTRYPOINT_FILENAMES = {
     "__main__.py", "main.py", "app.py", "server.py", "cli.py", "manage.py", "wsgi.py", "asgi.py",
     "main.ts", "main.tsx", "main.js", "main.jsx",
@@ -1560,6 +1577,7 @@ class RepoMap:
         report.quick_actions = self._build_impact_quick_actions(report.impacted_files, report.suggested_checks)
         report.edit_candidates = self._build_impact_edit_candidates(report.impacted_files, report.quick_actions)
         report.edit_plan = self._build_impact_edit_plan(report.quick_actions, report.edit_candidates)
+        report.test_clusters = self._build_impact_test_clusters(report.impacted_files)
 
         diagnostics = list(self.diagnostics)
         if report.impacted_files:
@@ -1961,6 +1979,130 @@ class RepoMap:
             )
 
         return steps
+
+    def _is_integration_test_path(self, rel_path: str) -> bool:
+        """Detect tests that look broader than a direct sibling/unit test."""
+        normalized = self._normalize_rel_path(rel_path).lower()
+        path = Path(normalized)
+        if any(part in INTEGRATION_TEST_MARKERS for part in path.parts):
+            return True
+
+        stem = path.stem
+        return any(marker in stem for marker in INTEGRATION_TEST_MARKERS)
+
+    def _suggest_test_cluster_command(self, rel_paths: List[str]) -> Optional[str]:
+        """Suggest a runner command for a small group of related test files."""
+        rel_paths = [path for path in rel_paths if path]
+        if not rel_paths:
+            return None
+        if len(rel_paths) == 1:
+            return self._suggest_test_command(rel_paths[0])
+
+        suffixes = {Path(path).suffix.lower() for path in rel_paths}
+        quoted_paths = " ".join(shlex.quote(path) for path in rel_paths[:6])
+
+        if suffixes == {".py"} and self._uses_pytest():
+            return f"pytest {quoted_paths}"
+
+        if suffixes.issubset({".js", ".jsx", ".ts", ".tsx"}):
+            js_runner = self._detect_js_test_runner()
+            if js_runner == "vitest":
+                return f"npx vitest run {quoted_paths}"
+            if js_runner == "jest":
+                return f"npx jest {quoted_paths}"
+            if js_runner == "mocha":
+                return f"npx mocha {quoted_paths}"
+
+        return None
+
+    def _build_impact_test_clusters(
+        self,
+        impacted_files: List[ImpactTarget],
+    ) -> List[ImpactTestCluster]:
+        """Group impacted tests into nearby, sibling, and integration clusters."""
+        impacted_tests = [target for target in impacted_files if target.is_test_file]
+        if not impacted_tests:
+            return []
+
+        impacted_non_tests = [target for target in impacted_files if not target.is_test_file]
+        sibling_sources_by_test = {}
+        for test_target in impacted_tests:
+            sibling_sources = []
+            for source_target in impacted_non_tests:
+                if test_target.path in self._candidate_related_test_paths(source_target.path):
+                    sibling_sources.append(source_target.path)
+            sibling_sources_by_test[test_target.path] = sibling_sources
+
+        grouped = {}
+        for test_target in impacted_tests:
+            sibling_sources = sibling_sources_by_test.get(test_target.path, [])
+            if self._is_integration_test_path(test_target.path):
+                cluster_kind = "integration"
+            elif sibling_sources:
+                cluster_kind = "sibling"
+            else:
+                cluster_kind = "nearby"
+
+            key = (test_target.seed_file, cluster_kind)
+            entry = grouped.setdefault(
+                key,
+                {
+                    "paths": [],
+                    "covers": [],
+                    "closest_distance": None,
+                    "focus_symbols": [],
+                },
+            )
+
+            if test_target.path not in entry["paths"]:
+                entry["paths"].append(test_target.path)
+            for source_path in sibling_sources:
+                if source_path not in entry["covers"]:
+                    entry["covers"].append(source_path)
+            if entry["closest_distance"] is None or test_target.distance < entry["closest_distance"]:
+                entry["closest_distance"] = test_target.distance
+            for symbol in test_target.boundary_symbols:
+                if symbol and symbol not in entry["focus_symbols"]:
+                    entry["focus_symbols"].append(symbol)
+
+        clusters = []
+        for (seed_file, cluster_kind), data in grouped.items():
+            paths = sorted(data["paths"])
+            covers = sorted(data["covers"])
+            if cluster_kind == "integration":
+                reason = f"Integration-style tests reachable from {seed_file}."
+            elif cluster_kind == "sibling":
+                reason = (
+                    f"Sibling tests closely matched to impacted file(s): {', '.join(covers[:3])}."
+                    if covers
+                    else f"Sibling tests closely matched to the impact path from {seed_file}."
+                )
+            else:
+                reason = f"Nearby validation tests in the same impact neighborhood as {seed_file}."
+
+            clusters.append(
+                ImpactTestCluster(
+                    kind=cluster_kind,
+                    seed_file=seed_file,
+                    paths=paths[:6],
+                    covers=covers[:5],
+                    closest_distance=data["closest_distance"],
+                    focus_symbols=data["focus_symbols"][:5],
+                    command_hint=self._suggest_test_cluster_command(paths[:6]),
+                    reason=reason,
+                )
+            )
+
+        kind_priority = {"sibling": 0, "nearby": 1, "integration": 2}
+        clusters.sort(
+            key=lambda item: (
+                item.closest_distance if item.closest_distance is not None else 99,
+                kind_priority.get(item.kind, 9),
+                item.seed_file,
+                item.paths[0] if item.paths else "",
+            )
+        )
+        return clusters[:6]
 
     def _build_impact_quick_actions(
         self,

@@ -93,6 +93,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - `quick_actions` now also include `target_role`, so agents can distinguish test/config/public API/entrypoint/neighbor boundaries at a glance
 - Impact analysis now also emits concrete `edit_candidates` with file/symbol anchors for the most likely next edits
 - Impact analysis now also emits a lightweight `edit_plan` lane and a matching `--edit-plan` CLI mode for compact "what to edit next" workflows
+- Impact analysis now also groups impacted tests into `test_clusters` such as `sibling`, `nearby`, and `integration`, with optional grouped test commands
 - Impact analysis now also surfaces shared boundary symbols, changed seed symbols, diff hunks, concrete file/line locations, and short boundary snippets so agents can jump straight to the likely change boundary
 - `suggested_checks` can now point directly at a boundary line/snippet instead of only naming a file
 
@@ -195,7 +196,7 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
-- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
+- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `test_clusters` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
 
 If you pass `--edit-plan`, text output switches to a compact edit-oriented view that prioritizes the first few high-signal next steps, along with their best concrete edit candidates.
 
@@ -225,7 +226,7 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files.
-The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
 
 ## Dependencies
 
