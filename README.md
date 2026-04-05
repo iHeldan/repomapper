@@ -11,7 +11,8 @@ Based on [pdavis68/RepoMapper](https://github.com/pdavis68/RepoMapper) (which is
 3. **Ranks** files using PageRank — heavily referenced modules surface to the top
 4. **Keeps** important docs and config files visible even when they don't contain parser-extracted symbols
 5. **Biases** ranking toward task-relevant files when you provide a free-form query
-6. **Compresses** the output to fit within a token budget (default 8192 tokens)
+6. **Surfaces** nearby related tests for highly relevant source files
+7. **Compresses** the output to fit within a token budget (default 8192 tokens)
 
 The result: an AI agent gets structural understanding of a 1000+ file codebase in ~4k tokens, instead of reading dozens of files (~50k+ tokens).
 
@@ -68,6 +69,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Parser bootstrap failures are surfaced as user-facing diagnostics instead of silently collapsing into an empty map
 - CLI and MCP responses now include structured per-file ranking metadata, including reason codes such as `chat_file`, `mentioned_identifier`, `important_file`, and `referenced_by`
 - Free-form queries can bias ranking toward matching file paths and symbol names, with explicit `query_path_match` and `query_symbol_match` reasons in the report
+- Nearby test files can be lifted into the map even when they lack parser definitions, with `related_tests` / `related_source` reasons in the report
 
 ## Supported languages
 
@@ -138,6 +140,7 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 
 - `ranked_files`: ranked file entries with scores, sample symbols, neighbor files, lines of interest, and machine-readable reasons
 - `query` / `query_terms`: the task prompt used for query-aware ranking plus the extracted ranking terms
+- `related_tests` / `related_sources`: heuristic source-to-test relationships to help agents find validating coverage quickly
 - `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
 - `map_tokens`: estimated token cost of the rendered map
 

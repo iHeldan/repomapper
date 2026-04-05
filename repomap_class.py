@@ -45,6 +45,7 @@ class RankedFile:
     rank: float
     base_rank: float
     included_in_map: bool = False
+    is_test_file: bool = False
     is_chat_file: bool = False
     is_mentioned_file: bool = False
     is_important_file: bool = False
@@ -55,6 +56,8 @@ class RankedFile:
     matched_query_terms: List[str] = field(default_factory=list)
     matched_query_path_terms: List[str] = field(default_factory=list)
     matched_query_symbol_terms: List[str] = field(default_factory=list)
+    related_tests: List[str] = field(default_factory=list)
+    related_sources: List[str] = field(default_factory=list)
     mentioned_identifiers: List[str] = field(default_factory=list)
     sample_symbols: List[str] = field(default_factory=list)
     inbound_neighbors: List[str] = field(default_factory=list)
@@ -88,6 +91,7 @@ QUERY_STOP_WORDS = {
     "the", "their", "this", "those", "was", "what", "when", "where", "which",
     "with",
 }
+TEST_DIR_NAMES = {"test", "tests", "__tests__", "spec", "specs"}
 
 # Tag namedtuple for storing parsed code definitions and references
 Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
@@ -302,6 +306,108 @@ class RepoMap:
             unique_values.append(value)
         return unique_values
 
+    @staticmethod
+    def _normalize_rel_path(rel_fname: str) -> str:
+        """Normalize relative paths to a forward-slash form for matching heuristics."""
+        return Path(rel_fname).as_posix()
+
+    def _is_test_file(self, rel_fname: str) -> bool:
+        """Heuristically detect whether a file is a test/spec file."""
+        normalized = self._normalize_rel_path(rel_fname).lower()
+        parts = normalized.split("/")
+        basename = parts[-1]
+        stem = Path(basename).stem.lower()
+
+        if any(part in TEST_DIR_NAMES for part in parts[:-1]):
+            return True
+
+        return (
+            basename.startswith("test_")
+            or basename.endswith("_test.py")
+            or ".test." in basename
+            or ".spec." in basename
+            or stem.startswith("test_")
+            or stem.endswith("_test")
+            or stem.endswith("_spec")
+        )
+
+    def _candidate_related_test_paths(self, rel_fname: str) -> List[str]:
+        """Generate likely test file paths for a source file."""
+        normalized = self._normalize_rel_path(rel_fname)
+        path = Path(normalized)
+        suffix = path.suffix
+        stem = path.stem
+        basename = path.name
+        parent_parts = list(path.parent.parts) if str(path.parent) != "." else []
+        source_relative_parts = parent_parts[:]
+        if source_relative_parts and source_relative_parts[0] in {"src", "lib", "app", "source"}:
+            source_relative_parts = source_relative_parts[1:]
+
+        candidate_names = [
+            basename,
+            f"test_{stem}{suffix}",
+            f"{stem}_test{suffix}",
+            f"{stem}.test{suffix}",
+            f"{stem}.spec{suffix}",
+        ]
+
+        candidate_dirs = [
+            parent_parts,
+            parent_parts + ["tests"],
+            parent_parts + ["test"],
+            parent_parts + ["__tests__"],
+            parent_parts + ["spec"],
+            ["tests"] + source_relative_parts,
+            ["test"] + source_relative_parts,
+            ["__tests__"] + source_relative_parts,
+            ["spec"] + source_relative_parts,
+        ]
+
+        candidates = []
+        for dir_parts in candidate_dirs:
+            dir_path = Path(*dir_parts) if dir_parts else Path()
+            for candidate_name in candidate_names:
+                candidates.append((dir_path / candidate_name).as_posix())
+        return self._dedupe_preserve_order(candidates)
+
+    def _find_related_test_files(self, rel_fname: str, known_rel_fnames: Set[str]) -> List[str]:
+        """Resolve likely test files for a source file from known repository files."""
+        if self._is_test_file(rel_fname):
+            return []
+        return [
+            candidate
+            for candidate in self._candidate_related_test_paths(rel_fname)
+            if candidate in known_rel_fnames and candidate != rel_fname and self._is_test_file(candidate)
+        ]
+
+    def _get_test_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
+        """Generate synthetic lines of interest for test files lacking parser definitions."""
+        text = self.read_text_func_internal(fname)
+        if not text:
+            return []
+
+        candidate_lines = []
+        fallback_lines = []
+        test_patterns = ("def test_", "class test", "it(", "test(", "describe(", "scenario(")
+
+        for line_num, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip().lower()
+            if not stripped:
+                continue
+            if len(fallback_lines) < 4:
+                fallback_lines.append(line_num)
+            if any(pattern in stripped for pattern in test_patterns):
+                candidate_lines.append(line_num)
+            if len(candidate_lines) >= 6:
+                break
+
+        lois = candidate_lines or fallback_lines
+        basename = Path(rel_fname).name
+        return [
+            Tag(rel_fname=rel_fname, fname=fname, line=line_num, name=basename, kind="test")
+            for line_num in lois
+        ]
+
     def _extract_query_terms(self, query: Optional[str]) -> List[str]:
         """Extract code-relevant terms from a free-form query string."""
         if not query:
@@ -355,11 +461,14 @@ class RepoMap:
         self,
         *,
         rel_fname: str,
+        is_test_file: bool,
         is_chat_file: bool,
         is_mentioned_file: bool,
         is_important_file: bool,
         matched_query_path_terms: List[str],
         matched_query_symbol_terms: List[str],
+        related_tests: List[str],
+        related_sources: List[str],
         mentioned_identifiers: List[str],
         inbound_neighbors: List[str],
         outbound_neighbors: List[str],
@@ -385,6 +494,20 @@ class RepoMap:
                 RankingReason(
                     "query_symbol_match",
                     f"Symbol names match query terms: {', '.join(matched_query_symbol_terms[:4])}.",
+                )
+            )
+        if related_tests:
+            reasons.append(
+                RankingReason(
+                    "related_tests",
+                    f"Has nearby related test file(s): {', '.join(related_tests[:3])}.",
+                )
+            )
+        if is_test_file and related_sources:
+            reasons.append(
+                RankingReason(
+                    "related_source",
+                    f"Likely tests related source file(s): {', '.join(related_sources[:3])}.",
                 )
             )
         if mentioned_identifiers:
@@ -675,6 +798,17 @@ class RepoMap:
         # R4 Finding B1-F2: Pre-compute rel_fname once per file to avoid redundant Path operations
         all_fnames = list(dict.fromkeys(chat_fnames + other_fnames))
         abs_to_rel: Dict[str, str] = {f: self.get_rel_fname(f) for f in all_fnames}
+        known_rel_fnames = set(abs_to_rel.values())
+        is_test_file_by_rel = {rel_fname: self._is_test_file(rel_fname) for rel_fname in known_rel_fnames}
+        related_tests_by_source = {
+            rel_fname: self._find_related_test_files(rel_fname, known_rel_fnames)
+            for rel_fname in known_rel_fnames
+            if not is_test_file_by_rel.get(rel_fname, False)
+        }
+        related_sources_by_test: Dict[str, List[str]] = defaultdict(list)
+        for source_rel_fname, related_tests in related_tests_by_source.items():
+            for test_rel_fname in related_tests:
+                related_sources_by_test[test_rel_fname].append(source_rel_fname)
 
         personalization = {}
         chat_fnames_set = set(chat_fnames)
@@ -715,6 +849,12 @@ class RepoMap:
                 synthetic_tags = self._get_important_file_tags(fname, rel_fname)
                 if synthetic_tags:
                     supplemental_tags_by_file[fname] = synthetic_tags
+
+            has_definitions = any(tag.kind == "def" for tag in tags)
+            if is_test_file_by_rel.get(rel_fname, False) and not has_definitions:
+                synthetic_test_tags = self._get_test_file_tags(fname, rel_fname)
+                if synthetic_test_tags:
+                    supplemental_tags_by_file.setdefault(fname, []).extend(synthetic_test_tags)
 
             path_matches, symbol_matches = self._match_query_terms(
                 rel_fname,
@@ -782,17 +922,34 @@ class RepoMap:
         # Collect and rank tags
         ranked_tags = []
         max_rank_by_file: Dict[str, float] = defaultdict(float)
+        effective_rank_by_file: Dict[str, float] = {}
+        query_boost_by_file: Dict[str, float] = {}
+
+        for rel_fname in known_rel_fnames:
+            effective_rank, query_boost = self._get_query_rank_context(
+                ranks.get(rel_fname, 0.0),
+                query_path_matches_by_file.get(rel_fname, []),
+                query_symbol_matches_by_file.get(rel_fname, []),
+            )
+            effective_rank_by_file[rel_fname] = effective_rank
+            query_boost_by_file[rel_fname] = query_boost
         
         for fname in included:
             rel_fname = abs_to_rel[fname]
-            file_rank = ranks.get(rel_fname, 0.0)
-            query_path_matches = query_path_matches_by_file.get(rel_fname, [])
-            query_symbol_matches = query_symbol_matches_by_file.get(rel_fname, [])
-            effective_file_rank, query_boost = self._get_query_rank_context(
-                file_rank,
-                query_path_matches,
-                query_symbol_matches,
-            )
+            effective_file_rank = effective_rank_by_file.get(rel_fname, ranks.get(rel_fname, 0.0))
+            query_boost = query_boost_by_file.get(rel_fname, 1.0)
+
+            if is_test_file_by_rel.get(rel_fname, False):
+                related_source_support = 0.0
+                for source_rel_fname in related_sources_by_test.get(rel_fname, []):
+                    source_support = effective_rank_by_file.get(source_rel_fname, ranks.get(source_rel_fname, 0.0))
+                    if source_rel_fname in chat_rel_fnames:
+                        source_support *= 4.0
+                    if source_rel_fname in mentioned_fnames:
+                        source_support *= 1.5
+                    source_support *= min(query_boost_by_file.get(source_rel_fname, 1.0), 2.0)
+                    related_source_support = max(related_source_support, source_support * 0.5)
+                effective_file_rank = max(effective_file_rank, related_source_support)
 
             # Exclude files with low Page Rank if exclude_unranked is True
             if self.exclude_unranked and effective_file_rank <= 0.0001 and fname not in supplemental_tags_by_file:
@@ -843,6 +1000,8 @@ class RepoMap:
             reference_names = self._dedupe_preserve_order(references_by_file.get(rel_fname, []))
             matched_query_path_terms = query_path_matches_by_file.get(rel_fname, [])
             matched_query_symbol_terms = query_symbol_matches_by_file.get(rel_fname, [])
+            related_tests = related_tests_by_source.get(rel_fname, [])
+            related_sources = related_sources_by_test.get(rel_fname, [])
             mentioned_identifiers = sorted(mentioned_identifiers_by_file.get(rel_fname, set()))
             lines_of_interest = sorted({
                 tag.line
@@ -858,9 +1017,10 @@ class RepoMap:
                     path=rel_fname,
                     rank=max_rank_by_file[rel_fname],
                     base_rank=ranks.get(rel_fname, 0.0),
+                    is_test_file=is_test_file_by_rel.get(rel_fname, False),
                     is_chat_file=fname in chat_fnames_set,
                     is_mentioned_file=rel_fname in mentioned_fnames,
-                    is_important_file=bool(supplemental_tags),
+                    is_important_file=any(tag.kind == "doc" for tag in supplemental_tags),
                     definitions=len(definitions_by_file.get(rel_fname, [])),
                     references=len(references_by_file.get(rel_fname, [])),
                     referenced_by_files=len(inbound_neighbors),
@@ -870,18 +1030,23 @@ class RepoMap:
                     ),
                     matched_query_path_terms=matched_query_path_terms,
                     matched_query_symbol_terms=matched_query_symbol_terms,
+                    related_tests=related_tests[:5],
+                    related_sources=related_sources[:5],
                     mentioned_identifiers=mentioned_identifiers,
-                    sample_symbols=(definition_names or reference_names)[:5],
+                    sample_symbols=(definition_names or reference_names or [Path(rel_fname).name])[:5],
                     inbound_neighbors=inbound_neighbors[:5],
                     outbound_neighbors=outbound_neighbors[:5],
                     lines_of_interest=lines_of_interest[:10],
                     reasons=self._build_file_reasons(
                         rel_fname=rel_fname,
+                        is_test_file=is_test_file_by_rel.get(rel_fname, False),
                         is_chat_file=fname in chat_fnames_set,
                         is_mentioned_file=rel_fname in mentioned_fnames,
-                        is_important_file=bool(supplemental_tags),
+                        is_important_file=any(tag.kind == "doc" for tag in supplemental_tags),
                         matched_query_path_terms=matched_query_path_terms,
                         matched_query_symbol_terms=matched_query_symbol_terms,
+                        related_tests=related_tests,
+                        related_sources=related_sources,
                         mentioned_identifiers=mentioned_identifiers,
                         inbound_neighbors=inbound_neighbors,
                         outbound_neighbors=outbound_neighbors,

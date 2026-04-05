@@ -172,6 +172,45 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("query_path_match", {reason.code for reason in by_path["auth_service.py"].reasons})
             self.assertIn("query_symbol_match", {reason.code for reason in by_path["auth_service.py"].reasons})
 
+    def test_related_tests_are_surfaced_for_high_ranked_source_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_dir = root / "src"
+            test_dir = root / "tests"
+            source_dir.mkdir()
+            test_dir.mkdir()
+            source_file = source_dir / "auth.py"
+            test_file = test_dir / "test_auth.py"
+            helper_file = source_dir / "billing.py"
+            source_file.write_text("def auth_login():\n    return True\n", encoding="utf-8")
+            test_file.write_text("def test_auth_login():\n    assert True\n", encoding="utf-8")
+            helper_file.write_text("def charge():\n    return True\n", encoding="utf-8")
+
+            tags_by_name = {
+                "auth.py": [Tag("src/auth.py", str(source_file), 1, "auth_login", "def")],
+                "test_auth.py": [],
+                "billing.py": [Tag("src/billing.py", str(helper_file), 1, "charge", "def")],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            map_content, file_report = repo_map.get_ranked_tags_map_uncached(
+                [str(source_file)],
+                [str(source_file), str(test_file), str(helper_file)],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertIn("tests/test_auth.py", by_path)
+            self.assertTrue(by_path["tests/test_auth.py"].is_test_file)
+            self.assertEqual(by_path["tests/test_auth.py"].related_sources, ["src/auth.py"])
+            self.assertEqual(by_path["src/auth.py"].related_tests, ["tests/test_auth.py"])
+            self.assertIn("related_source", {reason.code for reason in by_path["tests/test_auth.py"].reasons})
+            self.assertIn("related_tests", {reason.code for reason in by_path["src/auth.py"].reasons})
+            self.assertIn("tests/test_auth.py:", map_content)
+            self.assertIn("def test_auth_login()", map_content)
+
 
 class SearchIdentifierCacheTests(unittest.TestCase):
     def tearDown(self):
