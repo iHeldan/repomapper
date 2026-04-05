@@ -82,6 +82,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first
 - Impact analysis also emits a smaller `quick_actions` lane for low-risk next steps such as opening the closest changed boundary, running a nearby test, or checking a config assumption
+- `quick_actions` now include explicit `location_hint` anchors and, when the repo config clearly signals a runner, concrete `command_hint` test commands
 - Impact analysis now also surfaces shared boundary symbols, changed seed symbols, diff hunks, concrete file/line locations, and short boundary snippets so agents can jump straight to the likely change boundary
 - `suggested_checks` can now point directly at a boundary line/snippet instead of only naming a file
 
@@ -181,7 +182,7 @@ When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mod
 When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
-- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-action/per-suggestion anchor fields
+- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint` where available
 
 ### MCP Server
 
@@ -209,7 +210,7 @@ For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include 
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 The server also exposes `trace_file_path` for shortest-path explanations between two files.
-The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, a lightweight `quick_actions` lane for low-risk next moves, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, a lightweight `quick_actions` lane for low-risk next moves, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`.
 
 ## Dependencies
 

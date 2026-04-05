@@ -172,6 +172,10 @@ def format_impact_report(report) -> str:
         lines.append("Quick actions:")
         for action in report.quick_actions:
             lines.append(f"- [P{action.priority}] ({action.effort}) {action.kind} {action.target}: {action.message}")
+            if action.location_hint:
+                lines.append(f"  open {action.location_hint}")
+            if action.command_hint:
+                lines.append(f"  run {action.command_hint}")
             if action.anchor_file and action.anchor_line:
                 anchor_suffix = f" ({action.anchor_kind} {action.anchor_symbol})" if action.anchor_symbol else ""
                 lines.append(f"  at {action.anchor_file}:{action.anchor_line}{anchor_suffix}")

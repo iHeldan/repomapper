@@ -5,6 +5,7 @@ RepoMap class for generating repository maps.
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from collections import namedtuple, defaultdict, deque
 from typing import List, Dict, Set, Optional, Tuple, Callable
@@ -163,6 +164,8 @@ class ImpactQuickAction:
     target: str
     message: str
     effort: str = "small"
+    location_hint: Optional[str] = None
+    command_hint: Optional[str] = None
     seed_file: Optional[str] = None
     path_from_seed: List[str] = field(default_factory=list)
     anchor_file: Optional[str] = None
@@ -1615,6 +1618,16 @@ class RepoMap:
             if key in seen:
                 return
             seen.add(key)
+            location_hint = None
+            if suggestion.anchor_file and suggestion.anchor_line:
+                location_hint = f"{suggestion.anchor_file}:{suggestion.anchor_line}"
+            elif suggestion.target:
+                location_hint = suggestion.target
+
+            command_hint = None
+            if kind == "run_nearby_test":
+                command_hint = self._suggest_test_command(suggestion.target)
+
             quick_actions.append(
                 ImpactQuickAction(
                     priority=suggestion.priority if priority is None else priority,
@@ -1622,6 +1635,8 @@ class RepoMap:
                     target=suggestion.target,
                     message=message,
                     effort=effort,
+                    location_hint=location_hint,
+                    command_hint=command_hint,
                     seed_file=suggestion.seed_file,
                     path_from_seed=suggestion.path_from_seed[:],
                     anchor_file=suggestion.anchor_file,
@@ -1674,6 +1689,95 @@ class RepoMap:
 
         quick_actions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
         return quick_actions[:6]
+
+    def _suggest_test_command(self, rel_path: str) -> Optional[str]:
+        """Suggest a concrete test command when the repository gives a clear enough signal."""
+        suffix = Path(rel_path).suffix.lower()
+        quoted_path = shlex.quote(rel_path)
+
+        if suffix == ".py":
+            if self._uses_pytest():
+                return f"pytest {quoted_path}"
+            return None
+
+        if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+            js_runner = self._detect_js_test_runner()
+            if js_runner == "vitest":
+                return f"npx vitest run {quoted_path}"
+            if js_runner == "jest":
+                return f"npx jest {quoted_path}"
+            if js_runner == "mocha":
+                return f"npx mocha {quoted_path}"
+
+        return None
+
+    def _read_root_file(self, rel_path: str) -> Optional[str]:
+        """Read a root-level project file if it exists."""
+        abs_path = self.root / rel_path
+        if not abs_path.is_file():
+            return None
+        return self.read_text_func_internal(str(abs_path))
+
+    def _uses_pytest(self) -> bool:
+        """Infer whether pytest is the project's Python test runner."""
+        pyproject_text = self._read_root_file("pyproject.toml")
+        if pyproject_text and tomllib is not None:
+            try:
+                data = tomllib.loads(pyproject_text)
+            except (tomllib.TOMLDecodeError, TypeError):
+                data = {}
+            tool = data.get("tool") or {}
+            if "pytest" in tool or "pytest_env" in tool:
+                return True
+
+            project = data.get("project") or {}
+            dependency_names = set(self._extract_dependency_names(project.get("dependencies") or []))
+            optional_dependencies = project.get("optional-dependencies") or {}
+            for dep_list in optional_dependencies.values():
+                dependency_names.update(self._extract_dependency_names(dep_list or []))
+            if "pytest" in dependency_names:
+                return True
+
+        for config_name in ("pytest.ini", "tox.ini", "setup.cfg"):
+            config_text = self._read_root_file(config_name)
+            if config_text and "pytest" in config_text.lower():
+                return True
+
+        requirements_text = self._read_root_file("requirements.txt")
+        if requirements_text and re.search(r"(?mi)^pytest(?:[\[<=>].*)?$", requirements_text):
+            return True
+
+        return False
+
+    def _detect_js_test_runner(self) -> Optional[str]:
+        """Infer the dominant JS/TS test runner from package.json metadata."""
+        package_text = self._read_root_file("package.json")
+        if not package_text:
+            return None
+
+        try:
+            package_data = json.loads(package_text)
+        except json.JSONDecodeError:
+            return None
+
+        scripts = package_data.get("scripts") or {}
+        test_script = str(scripts.get("test") or "").lower()
+        dependencies = {
+            str(name).lower()
+            for name in (package_data.get("dependencies") or {}).keys()
+        }
+        dependencies.update(
+            str(name).lower()
+            for name in (package_data.get("devDependencies") or {}).keys()
+        )
+
+        if "vitest" in test_script or "vitest" in dependencies:
+            return "vitest"
+        if "jest" in test_script or "jest" in dependencies:
+            return "jest"
+        if "mocha" in test_script or "mocha" in dependencies:
+            return "mocha"
+        return None
 
     def _build_impact_suggestions(
         self,

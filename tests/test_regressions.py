@@ -164,6 +164,27 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertIn("(Config Highlights)", map_content)
             self.assertIn("- package: demo-app@1.2.3", map_content)
 
+    def test_quick_actions_can_infer_vitest_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {"test": "vitest run"},
+                        "devDependencies": {"vitest": "^1.0.0"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+
+            self.assertEqual(
+                repo_map._suggest_test_command("tests/example.test.ts"),
+                "npx vitest run tests/example.test.ts",
+            )
+
     def test_file_report_includes_ranked_files_reasons_and_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
@@ -422,12 +443,14 @@ class RepoMapRankingTests(unittest.TestCase):
             app_file = root / "app.py"
             service_file = root / "service.py"
             db_file = root / "db.py"
+            pyproject_file = root / "pyproject.toml"
             test_dir = root / "tests"
             test_dir.mkdir()
             test_file = test_dir / "test_service.py"
             app_file.write_text("def run_app():\n    Service()\n", encoding="utf-8")
             service_file.write_text("class Service:\n    db_query()\n", encoding="utf-8")
             db_file.write_text("def db_query():\n    return 1\n", encoding="utf-8")
+            pyproject_file.write_text("[tool.pytest.ini_options]\naddopts = \"-q\"\n", encoding="utf-8")
             test_file.write_text("def test_service():\n    assert True\n", encoding="utf-8")
 
             tags_by_name = {
@@ -495,6 +518,8 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(first_action.anchor_file, "tests/test_service.py")
             self.assertEqual(first_action.anchor_line, 1)
             self.assertEqual(first_action.effort, "small")
+            self.assertEqual(first_action.location_hint, "tests/test_service.py:1")
+            self.assertEqual(first_action.command_hint, "pytest tests/test_service.py")
             first_suggestion = report.suggested_checks[0]
             self.assertEqual(first_suggestion.anchor_file, "tests/test_service.py")
             self.assertEqual(first_suggestion.anchor_line, 1)
@@ -553,6 +578,8 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.quick_actions[0].anchor_file, "service.py")
             self.assertEqual(report.quick_actions[0].anchor_line, 1)
             self.assertEqual(report.quick_actions[0].anchor_symbol, "Service")
+            self.assertEqual(report.quick_actions[0].location_hint, "service.py:1")
+            self.assertIsNone(report.quick_actions[0].command_hint)
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
             self.assertEqual(report.suggested_checks[0].anchor_file, "service.py")
             self.assertEqual(report.suggested_checks[0].anchor_line, 1)
@@ -1006,6 +1033,8 @@ class CliPathResolutionTests(unittest.TestCase):
                             kind="open_changed_boundary",
                             target="service.py",
                             message="Open this changed boundary first and verify the nearby symbol contract.",
+                            location_hint="service.py:1",
+                            command_hint=None,
                             seed_file="app.py",
                             path_from_seed=["app.py", "service.py"],
                             anchor_file="service.py",
@@ -1077,6 +1106,8 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(payload["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
             self.assertEqual(payload["quick_actions"][0]["kind"], "open_changed_boundary")
+            self.assertEqual(payload["quick_actions"][0]["location_hint"], "service.py:1")
+            self.assertIsNone(payload["quick_actions"][0]["command_hint"])
             self.assertEqual(payload["quick_actions"][0]["anchor_file"], "service.py")
             self.assertEqual(payload["quick_actions"][0]["anchor_line"], 1)
             self.assertIn("class Service", payload["quick_actions"][0]["anchor_excerpt"])
@@ -1301,6 +1332,8 @@ class RepoMapServerTests(unittest.TestCase):
                             kind="run_nearby_test",
                             target="tests/test_app.py",
                             message="Run or inspect this nearby test before making broader edits.",
+                            location_hint="service.py:1",
+                            command_hint="pytest tests/test_app.py",
                             seed_file="app.py",
                             path_from_seed=["app.py", "tests/test_app.py"],
                             anchor_file="service.py",
@@ -1356,6 +1389,8 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertEqual(result["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
             self.assertEqual(result["quick_actions"][0]["kind"], "run_nearby_test")
+            self.assertEqual(result["quick_actions"][0]["location_hint"], "service.py:1")
+            self.assertEqual(result["quick_actions"][0]["command_hint"], "pytest tests/test_app.py")
             self.assertEqual(result["quick_actions"][0]["anchor_file"], "service.py")
             self.assertEqual(result["quick_actions"][0]["anchor_line"], 1)
             self.assertIn("class Service", result["quick_actions"][0]["anchor_excerpt"])
