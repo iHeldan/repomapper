@@ -22,4 +22,4 @@ repomap = "repomap:main"
 repomap-mcp = "repomap_server:main"
 
 [tool.setuptools]
-py-modules = ["git_support", "repomap_server", "repomap", "repomap_class", "parser_support", "utils", "importance", "scm"]
+py-modules = ["git_support", "repomap_server", "repomap", "repomap_class", "repomap_semantics", "parser_support", "utils", "importance", "scm"]

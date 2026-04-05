@@ -346,7 +346,7 @@ async def trace_file_path(
     max_hops: int = 6,
     download_missing_parsers: bool = False,
 ) -> Dict[str, Any]:
-    """Trace a shortest file-level connection path between two files in the repository graph.
+    """Trace a shortest connection path between two files in the repository graph.
 
     :param project_root: Root directory of the project to search. (must be an absolute path!)
     :param start_file: Start file path relative to project_root, or an absolute path under it.
@@ -354,7 +354,7 @@ async def trace_file_path(
     :param other_files: Optional file scope to limit the search. Defaults to all source files under project_root.
     :param max_hops: Maximum allowed hop count for the traced path. Defaults to 6.
     :param download_missing_parsers: If True, attempts to download required parser runtimes before building the graph.
-    :returns: A dictionary containing the path, step metadata, diagnostics, or an error.
+    :returns: A dictionary containing the path, step metadata, symbol-level trace evidence, diagnostics, or an error.
     """
     if error := _check_project_root(project_root):
         return error
@@ -426,7 +426,7 @@ async def analyze_file_impact(
     :param max_results: Maximum impacted files to return. Defaults to 10.
     :param download_missing_parsers: If True, attempts to download required parser runtimes before building the graph.
     :returns: A dictionary containing impacted files, quick actions, edit candidates, edit plan steps,
-        grouped test clusters, reason metadata, diagnostics, or an error.
+        grouped test clusters, symbol-level path evidence, reason metadata, diagnostics, or an error.
     """
     if error := _check_project_root(project_root):
         return error

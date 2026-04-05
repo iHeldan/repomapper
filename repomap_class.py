@@ -20,6 +20,7 @@ from utils import count_tokens, read_text, find_src_files
 from scm import get_scm_fname
 from importance import is_important
 from parser_support import resolve_parser_config, format_parser_runtime_error
+from repomap_semantics import collect_semantic_links, SemanticLink
 
 try:
     import tomllib
@@ -104,6 +105,20 @@ class ConnectionStep:
     target: str
     relation: str
     symbols: List[str] = field(default_factory=list)
+    symbol_hops: List["SymbolTraceHop"] = field(default_factory=list)
+
+
+@dataclass
+class SymbolTraceHop:
+    source_file: str
+    target_file: str
+    relation: str
+    source_symbol: Optional[str] = None
+    target_symbol: Optional[str] = None
+    source_line: Optional[int] = None
+    target_line: Optional[int] = None
+    evidence_kind: Optional[str] = None
+    detail: Optional[str] = None
 
 
 @dataclass
@@ -112,6 +127,7 @@ class ConnectionReport:
     end_file: str
     path: List[str] = field(default_factory=list)
     steps: List[ConnectionStep] = field(default_factory=list)
+    symbol_path: List[SymbolTraceHop] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -123,6 +139,7 @@ class ImpactTarget:
     distance: int
     path_from_seed: List[str] = field(default_factory=list)
     steps: List[ConnectionStep] = field(default_factory=list)
+    symbol_path: List[SymbolTraceHop] = field(default_factory=list)
     seed_focus_lines: List[int] = field(default_factory=list)
     seed_hunks: List["ImpactHunk"] = field(default_factory=list)
     changed_boundary_symbols: List[str] = field(default_factory=list)
@@ -944,10 +961,65 @@ class RepoMap:
 
         return None, []
 
+    @staticmethod
+    def _index_tag_lines(
+        tags_by_rel_fname: Dict[str, List[Tag]],
+    ) -> Tuple[Dict[Tuple[str, str], List[int]], Dict[Tuple[str, str], List[int]]]:
+        """Index definition and reference lines by file/symbol for trace annotations."""
+        def_lines: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+        ref_lines: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+
+        for rel_fname, tags in tags_by_rel_fname.items():
+            for tag in tags:
+                if tag.kind == "def":
+                    def_lines[(rel_fname, tag.name)].append(tag.line)
+                elif tag.kind == "ref":
+                    ref_lines[(rel_fname, tag.name)].append(tag.line)
+
+        return def_lines, ref_lines
+
+    @staticmethod
+    def _make_symbol_trace_hop_from_semantic_link(
+        link: SemanticLink,
+        def_lines: Dict[Tuple[str, str], List[int]],
+    ) -> SymbolTraceHop:
+        """Convert a semantic import/export edge into trace metadata."""
+        target_line = None
+        if link.target_symbol and link.target_symbol != "*":
+            target_candidates = def_lines.get((link.target, link.target_symbol), [])
+            if target_candidates:
+                target_line = min(target_candidates)
+
+        evidence_kind = "import_export"
+        if link.relation == "imports":
+            evidence_kind = "import"
+        elif link.relation == "re_exports":
+            evidence_kind = "re_export"
+        elif link.relation == "package_reexports":
+            evidence_kind = "package_boundary"
+
+        return SymbolTraceHop(
+            source_file=link.source,
+            target_file=link.target,
+            relation=link.relation,
+            source_symbol=link.source_symbol,
+            target_symbol=link.target_symbol,
+            source_line=link.line,
+            target_line=target_line,
+            evidence_kind=evidence_kind,
+            detail=link.detail,
+        )
+
     def _build_file_reference_graph(
         self,
         fnames: List[str],
-    ) -> Tuple[Dict[str, str], Dict[str, List[Tag]], nx.DiGraph, Dict[Tuple[str, str], List[str]]]:
+    ) -> Tuple[
+        Dict[str, str],
+        Dict[str, List[Tag]],
+        nx.DiGraph,
+        Dict[Tuple[str, str], List[str]],
+        Dict[Tuple[str, str], List[SymbolTraceHop]],
+    ]:
         """Build a file-level reference graph and edge labels from parser tags."""
         all_fnames = list(dict.fromkeys(os.path.abspath(fname) for fname in fnames))
         abs_to_rel = {fname: self.get_rel_fname(fname) for fname in all_fnames}
@@ -955,6 +1027,7 @@ class RepoMap:
         defines = defaultdict(set)
         references = defaultdict(set)
         edge_symbols = defaultdict(set)
+        edge_details = defaultdict(list)
         tags_by_rel_fname = {}
 
         for fname in all_fnames:
@@ -973,6 +1046,8 @@ class RepoMap:
                 elif tag.kind == "ref":
                     references[tag.name].add(rel_fname)
 
+        def_lines, ref_lines = self._index_tag_lines(tags_by_rel_fname)
+
         graph = nx.DiGraph()
         graph.add_nodes_from(abs_to_rel.values())
 
@@ -986,6 +1061,37 @@ class RepoMap:
                         continue
                     graph.add_edge(ref_fname, def_fname)
                     edge_symbols[(ref_fname, def_fname)].add(name)
+                    edge_details[(ref_fname, def_fname)].append(
+                        SymbolTraceHop(
+                            source_file=ref_fname,
+                            target_file=def_fname,
+                            relation="references",
+                            source_symbol=name,
+                            target_symbol=name,
+                            source_line=min(ref_lines.get((ref_fname, name), [None])),
+                            target_line=min(def_lines.get((def_fname, name), [None])),
+                            evidence_kind="callsite",
+                            detail=f"Reference to {name}",
+                        )
+                    )
+
+        for rel_fname in known_rel_fnames:
+            abs_fname = next((fname for fname, known_rel in abs_to_rel.items() if known_rel == rel_fname), None)
+            if not abs_fname:
+                continue
+            text = self.read_text_func_internal(abs_fname)
+            if not text:
+                continue
+
+            for semantic_link in collect_semantic_links(rel_fname, text, known_rel_fnames):
+                graph.add_edge(semantic_link.source, semantic_link.target)
+                if semantic_link.target_symbol and semantic_link.target_symbol != "*":
+                    edge_symbols[(semantic_link.source, semantic_link.target)].add(semantic_link.target_symbol)
+                elif semantic_link.source_symbol and semantic_link.source_symbol != "*":
+                    edge_symbols[(semantic_link.source, semantic_link.target)].add(semantic_link.source_symbol)
+                edge_details[(semantic_link.source, semantic_link.target)].append(
+                    self._make_symbol_trace_hop_from_semantic_link(semantic_link, def_lines)
+                )
 
         for rel_fname in known_rel_fnames:
             if self._is_test_file(rel_fname):
@@ -995,10 +1101,31 @@ class RepoMap:
                 graph.add_edge(test_rel_fname, rel_fname)
                 edge_symbols[(rel_fname, test_rel_fname)].add("__related_test__")
                 edge_symbols[(test_rel_fname, rel_fname)].add("__related_source__")
+                edge_details[(rel_fname, test_rel_fname)].append(
+                    SymbolTraceHop(
+                        source_file=rel_fname,
+                        target_file=test_rel_fname,
+                        relation="related_test",
+                        evidence_kind="test_link",
+                        detail="Heuristic source-to-test link",
+                    )
+                )
+                edge_details[(test_rel_fname, rel_fname)].append(
+                    SymbolTraceHop(
+                        source_file=test_rel_fname,
+                        target_file=rel_fname,
+                        relation="related_source",
+                        evidence_kind="test_link",
+                        detail="Heuristic test-to-source link",
+                    )
+                )
 
         return abs_to_rel, tags_by_rel_fname, graph, {
             pair: sorted(symbols)
             for pair, symbols in edge_symbols.items()
+        }, {
+            pair: details[:8]
+            for pair, details in edge_details.items()
         }
 
     def trace_file_path(
@@ -1037,7 +1164,7 @@ class RepoMap:
                 error=f"End file is not in the selected repository scope: {end_rel}",
             )
 
-        _, _, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        _, _, graph, edge_symbols, edge_details = self._build_file_reference_graph(all_fnames)
         undirected_graph = graph.to_undirected()
 
         if start_rel not in undirected_graph or end_rel not in undirected_graph:
@@ -1068,7 +1195,8 @@ class RepoMap:
                 error=f"Shortest path is {hop_count} hops, which exceeds the max_hops limit of {max_hops}.",
             )
 
-        steps = self._build_connection_steps(path, graph, edge_symbols)
+        steps = self._build_connection_steps(path, graph, edge_symbols, edge_details)
+        symbol_path = self._flatten_symbol_path(steps)
 
         diagnostics = list(self.diagnostics)
         if hop_count:
@@ -1079,6 +1207,7 @@ class RepoMap:
             end_file=end_rel,
             path=path,
             steps=steps,
+            symbol_path=symbol_path,
             diagnostics=diagnostics,
         )
 
@@ -1252,23 +1381,66 @@ class RepoMap:
             symbols, distances = collect_within(8)
         return symbols[:8], distances, hunks
 
+    @staticmethod
+    def _choose_step_relation(details: List[SymbolTraceHop], default_relation: str) -> str:
+        """Prefer more semantic edge relations when rendering a trace step."""
+        priority = {
+            "package_reexports": 0,
+            "re_exports": 1,
+            "imports": 2,
+            "references": 3,
+            "related_test": 4,
+            "related_source": 5,
+        }
+        if not details:
+            return default_relation
+        best = min(details, key=lambda item: priority.get(item.relation, 9))
+        return best.relation
+
+    @staticmethod
+    def _flatten_symbol_path(steps: List[ConnectionStep]) -> List[SymbolTraceHop]:
+        """Expose a flattened symbol-level trace alongside step-level annotations."""
+        symbol_path = []
+        seen = set()
+        for step in steps:
+            for hop in step.symbol_hops:
+                key = (
+                    hop.source_file,
+                    hop.target_file,
+                    hop.relation,
+                    hop.source_symbol,
+                    hop.target_symbol,
+                    hop.source_line,
+                    hop.target_line,
+                    hop.detail,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                symbol_path.append(hop)
+        return symbol_path[:16]
+
     def _build_connection_steps(
         self,
         path: List[str],
         graph: nx.DiGraph,
         edge_symbols: Dict[Tuple[str, str], List[str]],
+        edge_details: Dict[Tuple[str, str], List[SymbolTraceHop]],
     ) -> List[ConnectionStep]:
         """Convert a path into directional step metadata."""
         steps = []
         for source, target in zip(path, path[1:]):
             if graph.has_edge(source, target):
                 symbols = edge_symbols.get((source, target), [])
-                relation = "references"
+                details = edge_details.get((source, target), [])
+                relation = self._choose_step_relation(details, "references")
             elif graph.has_edge(target, source):
                 symbols = edge_symbols.get((target, source), [])
+                details = edge_details.get((target, source), [])
                 relation = "referenced_by"
             else:
                 symbols = []
+                details = []
                 relation = "related"
 
             if "__related_test__" in symbols:
@@ -1278,7 +1450,23 @@ class RepoMap:
                 relation = "related_source"
                 symbols = []
 
-            steps.append(ConnectionStep(source=source, target=target, relation=relation, symbols=symbols[:5]))
+            step_hops = []
+            for hop in details:
+                step_hops.append(
+                    SymbolTraceHop(
+                        source_file=source,
+                        target_file=target,
+                        relation=hop.relation,
+                        source_symbol=hop.source_symbol,
+                        target_symbol=hop.target_symbol,
+                        source_line=hop.source_line,
+                        target_line=hop.target_line,
+                        evidence_kind=hop.evidence_kind,
+                        detail=hop.detail,
+                    )
+                )
+
+            steps.append(ConnectionStep(source=source, target=target, relation=relation, symbols=symbols[:5], symbol_hops=step_hops[:6]))
         return steps
 
     def analyze_file_impact(
@@ -1351,7 +1539,7 @@ class RepoMap:
             report.diagnostics = list(self.diagnostics)
             return report
 
-        _, tags_by_rel_fname, graph, edge_symbols = self._build_file_reference_graph(all_fnames)
+        _, tags_by_rel_fname, graph, edge_symbols, edge_details = self._build_file_reference_graph(all_fnames)
         undirected_graph = graph.to_undirected()
 
         seed_rel_files = [abs_to_rel[seed_abs] for seed_abs in seed_abs_files]
@@ -1407,7 +1595,8 @@ class RepoMap:
             if not target_abs:
                 continue
 
-            steps = self._build_connection_steps(path, graph, edge_symbols)
+            steps = self._build_connection_steps(path, graph, edge_symbols, edge_details)
+            symbol_path = self._flatten_symbol_path(steps)
             seed_focus_lines = changed_lines_by_rel.get(seed_rel, [])
             seed_hunks = changed_hunks_by_rel.get(seed_rel, [])
             changed_seed_symbols, changed_seed_symbol_distances, _ = changed_seed_metadata_by_rel.get(
@@ -1532,6 +1721,7 @@ class RepoMap:
                     distance=distance,
                     path_from_seed=path,
                     steps=steps,
+                    symbol_path=symbol_path,
                     seed_focus_lines=seed_focus_lines[:12],
                     seed_hunks=seed_hunks[:6],
                     changed_boundary_symbols=changed_boundary_symbols,
@@ -3076,6 +3266,7 @@ class RepoMap:
         query_path_matches_by_file: Dict[str, List[str]] = {}
         query_symbol_matches_by_file: Dict[str, List[str]] = {}
         mentioned_identifiers_by_file: Dict[str, Set[str]] = defaultdict(set)
+        semantic_links: List[SemanticLink] = []
 
         defines = defaultdict(set)
         references = defaultdict(set)
@@ -3161,6 +3352,10 @@ class RepoMap:
             if runtime_role_tags:
                 supplemental_tags_by_file.setdefault(fname, []).extend(runtime_role_tags)
 
+            semantic_text = self.read_text_func_internal(fname)
+            if semantic_text:
+                semantic_links.extend(collect_semantic_links(rel_fname, semantic_text, known_rel_fnames))
+
             path_matches, symbol_matches = self._match_query_terms(
                 rel_fname,
                 tags + supplemental_tags_by_file.get(fname, []),
@@ -3189,6 +3384,9 @@ class RepoMap:
                 for def_fname in def_fnames:
                     if ref_fname != def_fname:
                         edges_to_add.append((ref_fname, def_fname, {'name': name}))
+        for link in semantic_links:
+            edge_name = link.target_symbol or link.source_symbol or f"__semantic_{link.relation}__"
+            edges_to_add.append((link.source, link.target, {'name': edge_name}))
         G.add_edges_from(edges_to_add)
         
         if not G.nodes():

@@ -80,6 +80,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Changed-file mode can optionally include graph-near neighbors, with `changed_file` / `changed_neighbor` reasons and explicit changed-file metadata in the report
 - Important docs and config files can expose structured highlights such as README headings, package scripts, workflow jobs and Docker entrypoints
 - File-to-file tracing can explain how two parts of the repo connect through references and source/test relationships
+- File tracing and impact analysis now understand TS/JS import + re-export chains and Python package boundaries, not just raw same-name references
 - Impact analysis can explain which nearby files are most likely affected by a change, with shortest paths, reasons, and related tests
 - Impact analysis now also emits a prioritized `suggested_checks` checklist so agents can decide what to inspect first
 - Impact analysis also emits a smaller `quick_actions` lane for low-risk next steps such as opening the closest changed boundary, running a nearby test, or checking a config assumption
@@ -191,12 +192,12 @@ When using `--output-format json`, the CLI returns both the rendered text map an
 When using `--trace-from` and `--trace-to`, the CLI switches to path-tracing mode and returns either:
 
 - a readable hop-by-hop explanation in text mode
-- or a structured `path` + `steps` payload in JSON mode
+- or a structured `path` + `steps` + `symbol_path` payload in JSON mode, where each step can also include symbol-level `symbol_hops` evidence for callsites, imports, re-exports, and package boundaries
 
 When using `--impact-from` or `--impact-changed`, the CLI switches to impact-analysis mode and returns either:
 
 - a readable list of nearby impacted files with shortest paths and relations in text mode
-- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `test_clusters` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
+- or a structured `seed_files` + `impacted_files` + `shared_symbols` + `quick_actions` + `edit_candidates` + `edit_plan` + `test_clusters` + `suggested_checks` payload in JSON mode, including `changed_seed_symbols`, `changed_hunks_by_file`, `seed_hunks`, `seed_focus_lines`, `changed_boundary_symbols`, `changed_boundary_distances`, `boundary_locations`, `boundary_snippets`, per-target `symbol_path`, target `focus_lines`, and per-action/per-suggestion anchor fields plus `location_hint`/`command_hint`, `risk_level`/`why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` where available
 
 If you pass `--edit-plan`, text output switches to a compact edit-oriented view that prioritizes the first few high-signal next steps, along with their best concrete edit candidates.
 
@@ -225,8 +226,8 @@ For change-focused workflows, pass `changed_only=true` and optionally `base_ref=
 For impact-focused workflows, pass `changed_neighbors=1` (or higher) to include nearby graph neighbors around those changed files.
 For task-focused workflows, pass `query="auth login flow"` to bias ranking toward matching paths and symbols.
 The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
-The server also exposes `trace_file_path` for shortest-path explanations between two files.
-The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
+The server also exposes `trace_file_path` for shortest-path explanations between two files. Its response now includes symbol-level evidence such as callsites, imports, TS/JS re-exports, and Python package-boundary hops.
+The server also exposes `analyze_file_impact` for "what else is likely affected?" workflows around one or more seed files, or around git-changed files via `changed_only=true` and optional `base_ref`. Its response now includes changed seed symbols from the diff, grouped changed hunks, shared boundary symbols, concrete file/line boundary locations, symbol-level path evidence, a lightweight `quick_actions` lane for low-risk next moves, concrete `edit_candidates`, a compact `edit_plan`, grouped `test_clusters`, and prioritized `suggested_checks` items such as nearby tests, boundary APIs, entrypoints, and config files worth verifying next. When the repository clearly signals a test runner, quick actions can also include a ready-to-run `command_hint`, plus `risk_level`, `why_now`, `expected_outcome`, `follow_if_true` / `follow_if_false`, `confidence`, `focus_symbols`, `focus_reason`, and `target_role` fields for fast prioritization.
 
 ## Dependencies
 

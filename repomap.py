@@ -89,6 +89,34 @@ def format_connection_report(report) -> str:
         for step in report.steps:
             symbol_suffix = f" via {', '.join(step.symbols[:4])}" if step.symbols else ""
             lines.append(f"- {step.source} --{step.relation}{symbol_suffix}--> {step.target}")
+            for hop in step.symbol_hops[:3]:
+                symbol_parts = []
+                if hop.source_symbol:
+                    source_ref = hop.source_symbol
+                    if hop.source_line:
+                        source_ref = f"{source_ref}@{hop.source_line}"
+                    symbol_parts.append(source_ref)
+                if hop.target_symbol:
+                    target_ref = hop.target_symbol
+                    if hop.target_line:
+                        target_ref = f"{target_ref}@{hop.target_line}"
+                    symbol_parts.append(target_ref)
+                if symbol_parts or hop.detail:
+                    preview = " -> ".join(symbol_parts) if symbol_parts else hop.detail or hop.relation
+                    suffix = f" ({hop.evidence_kind})" if hop.evidence_kind else ""
+                    lines.append(f"  {preview}{suffix}")
+    if report.symbol_path:
+        lines.append("")
+        lines.append("Symbol trace:")
+        for hop in report.symbol_path[:8]:
+            lhs = hop.source_symbol or hop.source_file
+            rhs = hop.target_symbol or hop.target_file
+            if hop.source_line:
+                lhs = f"{lhs}@{hop.source_line}"
+            if hop.target_line:
+                rhs = f"{rhs}@{hop.target_line}"
+            kind_suffix = f" [{hop.evidence_kind}]" if hop.evidence_kind else ""
+            lines.append(f"- {hop.source_file} --{hop.relation}--> {hop.target_file}: {lhs} -> {rhs}{kind_suffix}")
     if report.diagnostics:
         lines.append("")
         lines.append("Diagnostics:")
@@ -164,6 +192,16 @@ def format_impact_report(report) -> str:
                 "Relations: "
                 + " -> ".join(relation_chunks)
             )
+        if target.symbol_path:
+            lines.append("Symbol trace:")
+            for hop in target.symbol_path[:4]:
+                lhs = hop.source_symbol or hop.source_file
+                rhs = hop.target_symbol or hop.target_file
+                if hop.source_line:
+                    lhs = f"{lhs}@{hop.source_line}"
+                if hop.target_line:
+                    rhs = f"{rhs}@{hop.target_line}"
+                lines.append(f"  {hop.relation}: {lhs} -> {rhs}")
         if target.reasons:
             lines.append(f"Why: {target.reasons[0].message}")
 
