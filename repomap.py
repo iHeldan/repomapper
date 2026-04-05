@@ -118,8 +118,26 @@ def format_impact_report(report) -> str:
         lines.append(f"Path: {' -> '.join(target.path_from_seed)}")
         if target.seed_focus_lines:
             lines.append(f"Seed lines: {', '.join(str(line) for line in target.seed_focus_lines[:6])}")
+        if target.seed_hunks:
+            lines.append(
+                "Seed hunks: "
+                + ", ".join(
+                    str(hunk.start_line) if hunk.start_line == hunk.end_line else f"{hunk.start_line}-{hunk.end_line}"
+                    for hunk in target.seed_hunks[:4]
+                )
+            )
         if target.changed_boundary_symbols:
             lines.append(f"Changed boundary symbols: {', '.join(target.changed_boundary_symbols[:5])}")
+        if target.changed_boundary_distances:
+            lines.append(
+                "Changed boundary distances: "
+                + ", ".join(
+                    f"{symbol}:{distance}"
+                    for symbol, distance in list(target.changed_boundary_distances.items())[:5]
+                )
+            )
+        if target.closest_changed_hunk_distance is not None:
+            lines.append(f"Closest changed hunk distance: {target.closest_changed_hunk_distance}")
         if target.boundary_symbols:
             lines.append(f"Boundary symbols: {', '.join(target.boundary_symbols[:5])}")
         if target.boundary_relations:
@@ -156,6 +174,11 @@ def format_impact_report(report) -> str:
         for symbol in report.shared_symbols[:8]:
             distance_suffix = f", closest hop {symbol.closest_distance}" if symbol.closest_distance is not None else ""
             changed_suffix = " [changed]" if symbol.is_changed_seed_symbol else ""
+            changed_hunk_suffix = (
+                f", hunk distance {symbol.closest_changed_hunk_distance}"
+                if symbol.closest_changed_hunk_distance is not None
+                else ""
+            )
             location_suffix = ""
             if symbol.locations:
                 location_preview = ", ".join(
@@ -164,7 +187,7 @@ def format_impact_report(report) -> str:
                 )
                 location_suffix = f" [{location_preview}]"
             lines.append(
-                f"- {symbol.name}{changed_suffix}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}{location_suffix}"
+                f"- {symbol.name}{changed_suffix}: {symbol.target_count} target(s){distance_suffix}{changed_hunk_suffix} -> {', '.join(symbol.target_files[:4])}{location_suffix}"
             )
 
     if report.changed_seed_symbols:
@@ -172,8 +195,15 @@ def format_impact_report(report) -> str:
         lines.append("Changed seed symbols:")
         for seed_file, symbols in sorted(report.changed_seed_symbols.items()):
             seed_lines = report.changed_lines_by_file.get(seed_file, [])
+            seed_hunks = report.changed_hunks_by_file.get(seed_file, [])
             line_suffix = f" (lines {', '.join(str(line) for line in seed_lines[:6])})" if seed_lines else ""
-            lines.append(f"- {seed_file}{line_suffix}: {', '.join(symbols[:6])}")
+            hunk_suffix = ""
+            if seed_hunks:
+                hunk_suffix = " hunks " + ", ".join(
+                    str(hunk.start_line) if hunk.start_line == hunk.end_line else f"{hunk.start_line}-{hunk.end_line}"
+                    for hunk in seed_hunks[:4]
+                )
+            lines.append(f"- {seed_file}{line_suffix}{hunk_suffix}: {', '.join(symbols[:6])}")
 
     if report.diagnostics:
         lines.append("")

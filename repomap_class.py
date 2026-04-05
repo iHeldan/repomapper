@@ -123,7 +123,10 @@ class ImpactTarget:
     path_from_seed: List[str] = field(default_factory=list)
     steps: List[ConnectionStep] = field(default_factory=list)
     seed_focus_lines: List[int] = field(default_factory=list)
+    seed_hunks: List["ImpactHunk"] = field(default_factory=list)
     changed_boundary_symbols: List[str] = field(default_factory=list)
+    changed_boundary_distances: Dict[str, int] = field(default_factory=dict)
+    closest_changed_hunk_distance: Optional[int] = None
     boundary_symbols: List[str] = field(default_factory=list)
     boundary_relations: List[str] = field(default_factory=list)
     boundary_locations: List["ImpactLocation"] = field(default_factory=list)
@@ -156,6 +159,12 @@ class ImpactLocation:
 
 
 @dataclass
+class ImpactHunk:
+    start_line: int
+    end_line: int
+
+
+@dataclass
 class ImpactSymbol:
     name: str
     target_files: List[str] = field(default_factory=list)
@@ -163,6 +172,7 @@ class ImpactSymbol:
     target_count: int = 0
     closest_distance: Optional[int] = None
     is_changed_seed_symbol: bool = False
+    closest_changed_hunk_distance: Optional[int] = None
     locations: List[ImpactLocation] = field(default_factory=list)
 
 
@@ -173,6 +183,7 @@ class ImpactReport:
     max_results: int
     impacted_files: List[ImpactTarget] = field(default_factory=list)
     changed_lines_by_file: Dict[str, List[int]] = field(default_factory=dict)
+    changed_hunks_by_file: Dict[str, List[ImpactHunk]] = field(default_factory=dict)
     changed_seed_symbols: Dict[str, List[str]] = field(default_factory=dict)
     shared_symbols: List[ImpactSymbol] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
@@ -1009,36 +1020,85 @@ class RepoMap:
                 )
         return locations[:12]
 
-    def _extract_changed_symbols(
+    @staticmethod
+    def _group_changed_lines_into_hunks(changed_lines: List[int]) -> List[ImpactHunk]:
+        """Collapse raw changed lines into contiguous diff hunk ranges."""
+        if not changed_lines:
+            return []
+
+        sorted_lines = sorted(set(changed_lines))
+        hunks = []
+        start_line = sorted_lines[0]
+        end_line = sorted_lines[0]
+
+        for line in sorted_lines[1:]:
+            if line == end_line + 1:
+                end_line = line
+                continue
+            hunks.append(ImpactHunk(start_line=start_line, end_line=end_line))
+            start_line = line
+            end_line = line
+
+        hunks.append(ImpactHunk(start_line=start_line, end_line=end_line))
+        return hunks
+
+    @staticmethod
+    def _line_distance_to_hunks(line: int, hunks: List[ImpactHunk]) -> Optional[int]:
+        """Return the closest line distance from a symbol to any changed hunk."""
+        if not hunks:
+            return None
+
+        distances = []
+        for hunk in hunks:
+            if hunk.start_line <= line <= hunk.end_line:
+                distances.append(0)
+            elif line < hunk.start_line:
+                distances.append(hunk.start_line - line)
+            else:
+                distances.append(line - hunk.end_line)
+        return min(distances) if distances else None
+
+    @staticmethod
+    def _format_hunk(hunk: ImpactHunk) -> str:
+        """Render a compact human-readable hunk label."""
+        if hunk.start_line == hunk.end_line:
+            return str(hunk.start_line)
+        return f"{hunk.start_line}-{hunk.end_line}"
+
+    def _extract_changed_symbol_metadata(
         self,
         tags: List[Tag],
         changed_lines: List[int],
-    ) -> List[str]:
+    ) -> Tuple[List[str], Dict[str, int], List[ImpactHunk]]:
         """Infer which symbols are closest to the actually changed lines in a seed file."""
+        hunks = self._group_changed_lines_into_hunks(changed_lines)
         if not tags or not changed_lines:
-            return []
+            return [], {}, hunks
 
         candidate_tags = [tag for tag in tags if tag.kind in {"def", "ref"}]
         if not candidate_tags:
-            return []
+            return [], {}, hunks
 
-        changed_lines = sorted(set(changed_lines))
-
-        def collect_within(distance_limit: int) -> List[str]:
+        def collect_within(distance_limit: int) -> Tuple[List[str], Dict[str, int]]:
             symbols = []
+            distances = {}
             for tag in candidate_tags:
-                if min(abs(tag.line - line) for line in changed_lines) > distance_limit:
+                distance = self._line_distance_to_hunks(tag.line, hunks)
+                if distance is None or distance > distance_limit:
                     continue
                 if tag.name not in symbols:
                     symbols.append(tag.name)
-            return symbols
+                current = distances.get(tag.name)
+                if current is None or distance < current:
+                    distances[tag.name] = distance
+            return symbols, distances
 
-        symbols = collect_within(0)
+        symbols, distances = collect_within(0)
         if not symbols:
-            symbols = collect_within(2)
+            symbols, distances = collect_within(2)
         if not symbols:
-            symbols = collect_within(8)
-        return symbols[:8]
+            symbols, distances = collect_within(8)
+        return symbols[:8], distances, hunks
 
     def _build_connection_steps(
         self,
@@ -1115,6 +1175,15 @@ class RepoMap:
             rel_fname: line_numbers[:20]
             for rel_fname, line_numbers in changed_lines_by_rel.items()
         }
+        changed_hunks_by_rel = {
+            rel_fname: self._group_changed_lines_into_hunks(line_numbers)
+            for rel_fname, line_numbers in changed_lines_by_rel.items()
+        }
+        report.changed_hunks_by_file = {
+            rel_fname: hunks[:8]
+            for rel_fname, hunks in changed_hunks_by_rel.items()
+            if hunks
+        }
 
         seed_abs_files = [os.path.abspath(seed_file) for seed_file in seed_files]
         missing_seed_files = [
@@ -1148,8 +1217,8 @@ class RepoMap:
 
         candidate_targets = {}
         seed_rel_set = set(seed_rel_files)
-        changed_seed_symbols_by_rel = {
-            rel_fname: self._extract_changed_symbols(
+        changed_seed_metadata_by_rel = {
+            rel_fname: self._extract_changed_symbol_metadata(
                 tags_by_rel_fname.get(rel_fname, []),
                 changed_lines_by_rel.get(rel_fname, []),
             )
@@ -1158,7 +1227,7 @@ class RepoMap:
         }
         report.changed_seed_symbols = {
             rel_fname: symbols
-            for rel_fname, symbols in changed_seed_symbols_by_rel.items()
+            for rel_fname, (symbols, _, _) in changed_seed_metadata_by_rel.items()
             if symbols
         }
         for seed_rel in seed_rel_files:
@@ -1188,12 +1257,22 @@ class RepoMap:
 
             steps = self._build_connection_steps(path, graph, edge_symbols)
             seed_focus_lines = changed_lines_by_rel.get(seed_rel, [])
-            changed_seed_symbols = changed_seed_symbols_by_rel.get(seed_rel, [])
+            seed_hunks = changed_hunks_by_rel.get(seed_rel, [])
+            changed_seed_symbols, changed_seed_symbol_distances, _ = changed_seed_metadata_by_rel.get(
+                seed_rel,
+                ([], {}, []),
+            )
             boundary_symbols = self._extract_boundary_symbols(steps)
             changed_boundary_symbols = [
                 symbol for symbol in boundary_symbols
                 if symbol in changed_seed_symbols
             ]
+            changed_boundary_distances = {
+                symbol: changed_seed_symbol_distances[symbol]
+                for symbol in changed_boundary_symbols
+                if symbol in changed_seed_symbol_distances
+            }
+            closest_changed_hunk_distance = min(changed_boundary_distances.values()) if changed_boundary_distances else None
             boundary_locations = self._build_boundary_locations(path, tags_by_rel_fname, boundary_symbols)
             boundary_relations = []
             for step in steps:
@@ -1238,10 +1317,22 @@ class RepoMap:
                     )
                 )
             if changed_boundary_symbols:
+                hunk_preview = ", ".join(self._format_hunk(hunk) for hunk in seed_hunks[:2]) if seed_hunks else ""
+                distance_preview = min(changed_boundary_distances.values()) if changed_boundary_distances else 0
                 reasons.append(
                     RankingReason(
                         "changed_symbol_boundary",
                         f"Touches symbol(s) changed in {seed_rel}: {', '.join(changed_boundary_symbols[:4])}.",
+                    )
+                )
+                reasons.append(
+                    RankingReason(
+                        "changed_hunk_proximity",
+                        (
+                            f"Closest changed hunk"
+                            + (f" ({hunk_preview})" if hunk_preview else "")
+                            + f" is {distance_preview} line(s) away from the matched boundary."
+                        ),
                     )
                 )
             if is_test_file:
@@ -1289,7 +1380,10 @@ class RepoMap:
                     path_from_seed=path,
                     steps=steps,
                     seed_focus_lines=seed_focus_lines[:12],
+                    seed_hunks=seed_hunks[:6],
                     changed_boundary_symbols=changed_boundary_symbols,
+                    changed_boundary_distances=changed_boundary_distances,
+                    closest_changed_hunk_distance=closest_changed_hunk_distance,
                     boundary_symbols=boundary_symbols,
                     boundary_relations=boundary_relations[:5],
                     boundary_locations=boundary_locations,
@@ -1307,6 +1401,7 @@ class RepoMap:
         impacted_files.sort(
             key=lambda item: (
                 -(1 if item.changed_boundary_symbols else 0),
+                item.closest_changed_hunk_distance if item.closest_changed_hunk_distance is not None else 999,
                 -len(item.changed_boundary_symbols),
                 item.distance,
                 -(
@@ -1320,7 +1415,10 @@ class RepoMap:
             )
         )
         report.impacted_files = impacted_files[:max_results]
-        report.shared_symbols = self._build_impact_symbols(report.impacted_files, report.changed_seed_symbols)
+        report.shared_symbols = self._build_impact_symbols(
+            report.impacted_files,
+            report.changed_seed_symbols,
+        )
         report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
 
         diagnostics = list(self.diagnostics)
@@ -1355,6 +1453,7 @@ class RepoMap:
                         "target_files": [],
                         "seed_files": [],
                         "closest_distance": None,
+                        "closest_changed_hunk_distance": None,
                         "locations": [],
                     },
                 )
@@ -1364,6 +1463,12 @@ class RepoMap:
                     entry["seed_files"].append(target.seed_file)
                 if entry["closest_distance"] is None or target.distance < entry["closest_distance"]:
                     entry["closest_distance"] = target.distance
+                symbol_hunk_distance = target.changed_boundary_distances.get(symbol)
+                if symbol_hunk_distance is not None and (
+                    entry["closest_changed_hunk_distance"] is None
+                    or symbol_hunk_distance < entry["closest_changed_hunk_distance"]
+                ):
+                    entry["closest_changed_hunk_distance"] = symbol_hunk_distance
                 for location in target.boundary_locations:
                     if location.symbol != symbol:
                         continue
@@ -1387,6 +1492,7 @@ class RepoMap:
                     target_count=len(data["target_files"]),
                     closest_distance=data["closest_distance"],
                     is_changed_seed_symbol=name in changed_symbol_names,
+                    closest_changed_hunk_distance=data["closest_changed_hunk_distance"],
                     locations=data["locations"][:8],
                 )
             )
@@ -1394,6 +1500,7 @@ class RepoMap:
         symbols.sort(
             key=lambda item: (
                 -(1 if item.is_changed_seed_symbol else 0),
+                item.closest_changed_hunk_distance if item.closest_changed_hunk_distance is not None else 999,
                 -item.target_count,
                 item.closest_distance or 99,
                 item.name.lower(),
@@ -1500,10 +1607,17 @@ class RepoMap:
                     )
             if target.changed_boundary_symbols:
                 add_suggestion(
-                    1,
+                    0 if (target.closest_changed_hunk_distance == 0) else 1,
                     "review_changed_symbol_boundary",
                     target.path,
-                    f"Start with changed boundary symbols: {', '.join(target.changed_boundary_symbols[:3])}.",
+                    (
+                        f"Start with changed boundary symbols: {', '.join(target.changed_boundary_symbols[:3])}"
+                        + (
+                            f" (closest hunk distance {target.closest_changed_hunk_distance})."
+                            if target.closest_changed_hunk_distance is not None
+                            else "."
+                        )
+                    ),
                     seed_file=target.seed_file,
                     path_from_seed=target.path_from_seed,
                 )

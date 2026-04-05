@@ -516,14 +516,63 @@ class RepoMapRankingTests(unittest.TestCase):
             )
 
             self.assertEqual(report.changed_lines_by_file, {"app.py": [2]})
+            self.assertEqual(
+                [(h.start_line, h.end_line) for h in report.changed_hunks_by_file["app.py"]],
+                [(2, 2)],
+            )
             self.assertEqual(report.changed_seed_symbols, {"app.py": ["Service"]})
             target = report.impacted_files[0]
             self.assertEqual(target.changed_boundary_symbols, ["Service"])
+            self.assertEqual(target.changed_boundary_distances, {"Service": 0})
+            self.assertEqual(target.closest_changed_hunk_distance, 0)
             self.assertEqual(target.seed_focus_lines, [2])
+            self.assertEqual([(h.start_line, h.end_line) for h in target.seed_hunks], [(2, 2)])
             self.assertIn("changed_symbol_boundary", {reason.code for reason in target.reasons})
+            self.assertIn("changed_hunk_proximity", {reason.code for reason in target.reasons})
             self.assertEqual(report.shared_symbols[0].name, "Service")
             self.assertTrue(report.shared_symbols[0].is_changed_seed_symbol)
+            self.assertEqual(report.shared_symbols[0].closest_changed_hunk_distance, 0)
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
+
+    def test_analyze_file_impact_prefers_targets_closer_to_changed_hunks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            app_file = root / "app.py"
+            helper_file = root / "helper.py"
+            service_file = root / "service.py"
+            for path in (app_file, helper_file, service_file):
+                path.write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "app.py": [
+                    Tag("app.py", str(app_file), 2, "Service", "ref"),
+                    Tag("app.py", str(app_file), 5, "Helper", "ref"),
+                ],
+                "helper.py": [
+                    Tag("helper.py", str(helper_file), 1, "Helper", "def"),
+                ],
+                "service.py": [
+                    Tag("service.py", str(service_file), 1, "Service", "def"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            report = repo_map.analyze_file_impact(
+                [str(app_file)],
+                files=[str(app_file), str(helper_file), str(service_file)],
+                max_depth=2,
+                max_results=5,
+                changed_lines_by_file={str(app_file): [4]},
+            )
+
+            self.assertEqual([entry.path for entry in report.impacted_files], ["helper.py", "service.py"])
+            by_path = {entry.path: entry for entry in report.impacted_files}
+            self.assertEqual(by_path["helper.py"].closest_changed_hunk_distance, 1)
+            self.assertEqual(by_path["service.py"].closest_changed_hunk_distance, 2)
+            self.assertEqual(report.shared_symbols[0].name, "Helper")
+            self.assertEqual(report.shared_symbols[0].closest_changed_hunk_distance, 1)
 
 
 class SearchIdentifierCacheTests(unittest.TestCase):
