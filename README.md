@@ -65,6 +65,7 @@ Standard RepoMapper can't parse `.vue` files because Vue's tree-sitter grammar t
 - Important files like `README.md`, `pyproject.toml`, workflow YAMLs and docs can still appear in the map even when they have no tree-sitter symbol tags
 - Standalone `.tsx` files use the TSX parser/runtime instead of falling back to plain TypeScript parsing
 - Parser bootstrap failures are surfaced as user-facing diagnostics instead of silently collapsing into an empty map
+- CLI and MCP responses now include structured per-file ranking metadata, including reason codes such as `chat_file`, `mentioned_identifier`, `important_file`, and `referenced_by`
 
 ## Supported languages
 
@@ -123,7 +124,16 @@ repomap --root /path/to/project --download-missing-parsers
 
 # Pre-warm parser runtimes for the selected files and exit
 repomap --root /path/to/project --warm-languages auto
+
+# Emit structured JSON for agent workflows
+repomap --root /path/to/project --output-format json
 ```
+
+When using `--output-format json`, the CLI returns both the rendered text map and a structured `report` with:
+
+- `ranked_files`: ranked file entries with scores, sample symbols, neighbor files, lines of interest, and machine-readable reasons
+- `selected_files`: which ranked files actually fit into the token budget and were rendered into the text map
+- `map_tokens`: estimated token cost of the rendered map
 
 ### MCP Server
 
@@ -147,6 +157,7 @@ Security note: the bundled MCP server only accepts `project_root` values under `
 
 You can also ask the MCP tool to download missing parser runtimes by passing `download_missing_parsers=true`.
 For change-focused workflows, pass `changed_only=true` and optionally `base_ref="origin/main"` to restrict the map to git-changed files.
+The `report` payload also includes structured `ranked_files`, `selected_files`, and `map_tokens` fields for agent-friendly follow-up logic.
 
 ## Dependencies
 

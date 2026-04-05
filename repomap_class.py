@@ -34,12 +34,42 @@ _GLOBAL_DISK_CACHES = {}
 
 
 @dataclass
+class RankingReason:
+    code: str
+    message: str
+
+
+@dataclass
+class RankedFile:
+    path: str
+    rank: float
+    base_rank: float
+    included_in_map: bool = False
+    is_chat_file: bool = False
+    is_mentioned_file: bool = False
+    is_important_file: bool = False
+    definitions: int = 0
+    references: int = 0
+    referenced_by_files: int = 0
+    references_to_files: int = 0
+    mentioned_identifiers: List[str] = field(default_factory=list)
+    sample_symbols: List[str] = field(default_factory=list)
+    inbound_neighbors: List[str] = field(default_factory=list)
+    outbound_neighbors: List[str] = field(default_factory=list)
+    lines_of_interest: List[int] = field(default_factory=list)
+    reasons: List[RankingReason] = field(default_factory=list)
+
+
+@dataclass
 class FileReport:
     excluded: Dict[str, str]        # File -> exclusion reason with status
     definition_matches: int         # Total definition tags
     reference_matches: int          # Total reference tags
     total_files_considered: int     # Total files provided as input
     diagnostics: List[str] = field(default_factory=list)
+    ranked_files: List[RankedFile] = field(default_factory=list)
+    selected_files: List[str] = field(default_factory=list)
+    map_tokens: int = 0
 
 
 
@@ -247,6 +277,80 @@ class RepoMap:
         if rel_fname in chat_rel_fnames:
             boost *= 20.0
         return file_rank * boost
+
+    @staticmethod
+    def _dedupe_preserve_order(values: List[str]) -> List[str]:
+        """Return unique values while preserving first-seen order."""
+        seen = set()
+        unique_values = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            unique_values.append(value)
+        return unique_values
+
+    def _build_file_reasons(
+        self,
+        *,
+        rel_fname: str,
+        is_chat_file: bool,
+        is_mentioned_file: bool,
+        is_important_file: bool,
+        mentioned_identifiers: List[str],
+        inbound_neighbors: List[str],
+        outbound_neighbors: List[str],
+        definition_count: int,
+        reference_count: int,
+    ) -> List[RankingReason]:
+        """Build a short machine-readable explanation for why a file ranked highly."""
+        reasons = []
+
+        if is_chat_file:
+            reasons.append(RankingReason("chat_file", "File is part of the active chat/edit context."))
+        if is_mentioned_file:
+            reasons.append(RankingReason("mentioned_file", "File was explicitly mentioned by the caller."))
+        if mentioned_identifiers:
+            preview = ", ".join(mentioned_identifiers[:3])
+            if len(mentioned_identifiers) > 3:
+                preview += f", +{len(mentioned_identifiers) - 3} more"
+            reasons.append(
+                RankingReason(
+                    "mentioned_identifier",
+                    f"Defines or references explicitly mentioned identifiers: {preview}.",
+                )
+            )
+        if is_important_file:
+            reasons.append(
+                RankingReason(
+                    "important_file",
+                    "Important docs/config file retained even without parser-extracted symbols.",
+                )
+            )
+        if inbound_neighbors:
+            reasons.append(
+                RankingReason(
+                    "referenced_by",
+                    f"Referenced by {len(inbound_neighbors)} file(s): {', '.join(inbound_neighbors[:3])}.",
+                )
+            )
+        if outbound_neighbors:
+            reasons.append(
+                RankingReason(
+                    "references",
+                    f"Links to {len(outbound_neighbors)} related file(s): {', '.join(outbound_neighbors[:3])}.",
+                )
+            )
+        if definition_count:
+            reasons.append(
+                RankingReason("definitions", f"Defines {definition_count} symbol(s) captured by the parser.")
+            )
+        if reference_count:
+            reasons.append(
+                RankingReason("identifier_references", f"Contains {reference_count} symbol reference(s).")
+            )
+
+        return reasons
 
     def _get_important_file_tags(self, fname: str, rel_fname: str) -> List[Tag]:
         """Generate synthetic tags for important docs/configs that lack parser tags."""
@@ -478,7 +582,11 @@ class RepoMap:
         excluded: Dict[str, str] = {}
         total_definitions = 0
         total_references = 0
+        tags_by_file: Dict[str, List[Tag]] = {}
         supplemental_tags_by_file: Dict[str, List[Tag]] = {}
+        definitions_by_file: Dict[str, List[str]] = defaultdict(list)
+        references_by_file: Dict[str, List[str]] = defaultdict(list)
+        mentioned_identifiers_by_file: Dict[str, Set[str]] = defaultdict(set)
 
         defines = defaultdict(set)
         references = defaultdict(set)
@@ -503,6 +611,7 @@ class RepoMap:
             included.append(fname)
             
             tags = self.get_tags(fname, rel_fname)
+            tags_by_file[fname] = tags
             failure_reason = self._tag_failures.get(fname)
             if failure_reason:
                 excluded[fname] = failure_reason
@@ -511,10 +620,15 @@ class RepoMap:
             for tag in tags:
                 if tag.kind == "def":
                     defines[tag.name].add(rel_fname)
+                    definitions_by_file[rel_fname].append(tag.name)
                     total_definitions += 1
                 elif tag.kind == "ref":
                     references[tag.name].add(rel_fname)
+                    references_by_file[rel_fname].append(tag.name)
                     total_references += 1
+
+                if tag.name in mentioned_idents:
+                    mentioned_identifiers_by_file[rel_fname].add(tag.name)
 
             if not tags and is_important(rel_fname):
                 synthetic_tags = self._get_important_file_tags(fname, rel_fname)
@@ -568,6 +682,7 @@ class RepoMap:
         
         # Collect and rank tags
         ranked_tags = []
+        max_rank_by_file: Dict[str, float] = defaultdict(float)
         
         for fname in included:
             rel_fname = abs_to_rel[fname]
@@ -577,7 +692,7 @@ class RepoMap:
             if self.exclude_unranked and file_rank <= 0.0001 and fname not in supplemental_tags_by_file:
                 continue
             
-            tags = self.get_tags(fname, rel_fname)
+            tags = tags_by_file.get(fname, [])
             for tag in tags:
                 if tag.kind == "def":
                     final_rank = self._score_file_tag(
@@ -589,6 +704,7 @@ class RepoMap:
                         chat_rel_fnames,
                     )
                     ranked_tags.append((final_rank, tag))
+                    max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
 
             for tag in supplemental_tags_by_file.get(fname, []):
                 final_rank = self._score_file_tag(
@@ -600,6 +716,66 @@ class RepoMap:
                     chat_rel_fnames,
                 )
                 ranked_tags.append((final_rank, tag))
+                max_rank_by_file[rel_fname] = max(max_rank_by_file[rel_fname], final_rank)
+
+        ranked_files = []
+        for fname in included:
+            rel_fname = abs_to_rel[fname]
+            tags = tags_by_file.get(fname, [])
+            supplemental_tags = supplemental_tags_by_file.get(fname, [])
+
+            if not tags and not supplemental_tags:
+                continue
+            if rel_fname not in max_rank_by_file:
+                continue
+
+            inbound_neighbors = sorted(G.predecessors(rel_fname))
+            outbound_neighbors = sorted(G.successors(rel_fname))
+            definition_names = self._dedupe_preserve_order(definitions_by_file.get(rel_fname, []))
+            reference_names = self._dedupe_preserve_order(references_by_file.get(rel_fname, []))
+            mentioned_identifiers = sorted(mentioned_identifiers_by_file.get(rel_fname, set()))
+            lines_of_interest = sorted({
+                tag.line
+                for tag in tags
+                if tag.kind == "def"
+            } | {
+                tag.line
+                for tag in supplemental_tags
+            })
+
+            ranked_files.append(
+                RankedFile(
+                    path=rel_fname,
+                    rank=max_rank_by_file[rel_fname],
+                    base_rank=ranks.get(rel_fname, 0.0),
+                    is_chat_file=fname in chat_fnames_set,
+                    is_mentioned_file=rel_fname in mentioned_fnames,
+                    is_important_file=bool(supplemental_tags),
+                    definitions=len(definitions_by_file.get(rel_fname, [])),
+                    references=len(references_by_file.get(rel_fname, [])),
+                    referenced_by_files=len(inbound_neighbors),
+                    references_to_files=len(outbound_neighbors),
+                    mentioned_identifiers=mentioned_identifiers,
+                    sample_symbols=(definition_names or reference_names)[:5],
+                    inbound_neighbors=inbound_neighbors[:5],
+                    outbound_neighbors=outbound_neighbors[:5],
+                    lines_of_interest=lines_of_interest[:10],
+                    reasons=self._build_file_reasons(
+                        rel_fname=rel_fname,
+                        is_chat_file=fname in chat_fnames_set,
+                        is_mentioned_file=rel_fname in mentioned_fnames,
+                        is_important_file=bool(supplemental_tags),
+                        mentioned_identifiers=mentioned_identifiers,
+                        inbound_neighbors=inbound_neighbors,
+                        outbound_neighbors=outbound_neighbors,
+                        definition_count=len(definitions_by_file.get(rel_fname, [])),
+                        reference_count=len(references_by_file.get(rel_fname, [])),
+                    ),
+                )
+            )
+
+        ranked_files.sort(key=lambda entry: entry.rank, reverse=True)
+        file_report.ranked_files = ranked_files
         
         # Sort by rank (descending)
         ranked_tags.sort(key=lambda x: x[0], reverse=True)
@@ -741,8 +917,8 @@ class RepoMap:
             if num_files <= 0:
                 return None, 0
 
-            selected_files = fitting_files[:num_files]
-            tree_output = self.to_tree(selected_files)
+            selected_file_entries = fitting_files[:num_files]
+            tree_output = self.to_tree(selected_file_entries)
 
             if not tree_output:
                 return None, 0
@@ -753,6 +929,8 @@ class RepoMap:
         # Binary search for optimal number of files (start at 1; try_files(0) is always None)
         left, right = 1, len(fitting_files)
         best_tree = None
+        best_selected_files: List[str] = []
+        best_tokens = 0
 
         while left <= right:
             mid = (left + right) // 2
@@ -760,9 +938,17 @@ class RepoMap:
 
             if tree_output and tokens <= max_map_tokens:
                 best_tree = tree_output
+                best_selected_files = [rel_fname for rel_fname, _ in fitting_files[:mid]]
+                best_tokens = tokens
                 left = mid + 1
             else:
                 right = mid - 1
+
+        selected_paths = set(best_selected_files)
+        for ranked_file in file_report.ranked_files:
+            ranked_file.included_in_map = ranked_file.path in selected_paths
+        file_report.selected_files = best_selected_files
+        file_report.map_tokens = best_tokens
 
         return best_tree, file_report
     

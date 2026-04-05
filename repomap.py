@@ -8,6 +8,8 @@ Uses Tree-sitter for parsing and PageRank for ranking importance.
 """
 
 import argparse
+import dataclasses
+import json
 import sys
 from pathlib import Path
 
@@ -34,6 +36,11 @@ def expand_path_specs(root_path: Path, path_specs: list[str]) -> list[str]:
 def tool_output(*messages):
     """Print informational messages."""
     print(*messages, file=sys.stdout)
+
+
+def tool_info_stderr(message):
+    """Print informational messages to stderr."""
+    print(message, file=sys.stderr)
 
 
 def tool_warning(message):
@@ -168,6 +175,13 @@ Examples:
         "--base-ref",
         help="When used with --changed, also include committed changes since the merge-base with this git ref"
     )
+
+    parser.add_argument(
+        "--output-format",
+        choices=("text", "json"),
+        default="text",
+        help="Output as human-readable text or machine-readable JSON (default: text)"
+    )
     
     args = parser.parse_args()
     
@@ -176,8 +190,9 @@ Examples:
         return count_tokens(text, args.model)
     
     # Set up output handlers
+    info_handler = tool_output if args.output_format == "text" else tool_info_stderr
     output_handlers = {
-        'info': tool_output,
+        'info': info_handler,
         'warning': tool_warning,
         'error': tool_error
     }
@@ -215,25 +230,25 @@ Examples:
 
         if args.verbose:
             for diagnostic in git_result.diagnostics:
-                tool_output(diagnostic)
-            tool_output(f"Changed files selected: {len(other_files)}")
+                info_handler(diagnostic)
+            info_handler(f"Changed files selected: {len(other_files)}")
 
     inferred_parser_languages = infer_parser_languages(chat_files + other_files)
 
     if args.warm_languages:
         requested_languages = inferred_parser_languages if args.warm_languages == ["auto"] else args.warm_languages
         warmup_result = warm_languages(requested_languages)
-        success = report_parser_warmup(warmup_result, tool_output, tool_warning)
+        success = report_parser_warmup(warmup_result, info_handler, tool_warning)
         if not requested_languages:
             tool_warning("No supported parser runtimes were inferred from the selected files.")
         sys.exit(0 if success else 1)
 
     if args.download_missing_parsers:
         warmup_result = warm_languages(inferred_parser_languages)
-        report_parser_warmup(warmup_result, tool_output, tool_warning)
+        report_parser_warmup(warmup_result, info_handler, tool_warning)
 
     if args.verbose:
-        tool_output(f"Chat files: {chat_files}")
+        info_handler(f"Chat files: {chat_files}")
 
     # Convert mentioned files to sets
     mentioned_fnames = set(args.mentioned_files) if args.mentioned_files else None
@@ -262,18 +277,30 @@ Examples:
         )
 
         if map_content:
-            if args.verbose:
-                tokens = repo_map.token_count(map_content)
-                tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
-                tool_output(f"Files considered: {file_report.total_files_considered}, "
-                           f"Definitions: {file_report.definition_matches}, "
-                           f"References: {file_report.reference_matches}")
+            if args.output_format == "json":
+                print(json.dumps({
+                    "map": map_content,
+                    "report": dataclasses.asdict(file_report),
+                }, indent=2))
+            else:
+                if args.verbose:
+                    tokens = repo_map.token_count(map_content)
+                    tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
+                    tool_output(f"Files considered: {file_report.total_files_considered}, "
+                               f"Definitions: {file_report.definition_matches}, "
+                               f"References: {file_report.reference_matches}")
 
-            print(map_content)
+                print(map_content)
         else:
-            tool_output("No repository map generated.")
-            for diagnostic in file_report.diagnostics:
-                tool_warning(diagnostic)
+            if args.output_format == "json":
+                print(json.dumps({
+                    "map": None,
+                    "report": dataclasses.asdict(file_report),
+                }, indent=2))
+            else:
+                tool_output("No repository map generated.")
+                for diagnostic in file_report.diagnostics:
+                    tool_warning(diagnostic)
             
     except KeyboardInterrupt:
         tool_error("Interrupted by user")

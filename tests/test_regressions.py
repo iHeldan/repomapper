@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ import parser_support
 import repomap
 import repomap_class
 import repomap_server
-from repomap_class import FileReport, RepoMap, Tag
+from repomap_class import FileReport, RankedFile, RankingReason, RepoMap, Tag
 from utils import find_src_files, is_within_directory
 
 
@@ -93,6 +94,44 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(file_report.definition_matches, 1)
             self.assertIn("README.md:", map_content)
             self.assertIn("# Project Title", map_content)
+
+    def test_file_report_includes_ranked_files_reasons_and_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            for name in ("a.py", "b.py", "c.py"):
+                (root / name).write_text("# test\n", encoding="utf-8")
+
+            tags_by_name = {
+                "a.py": [
+                    Tag("a.py", str(root / "a.py"), 1, "A", "def"),
+                    Tag("a.py", str(root / "a.py"), 1, "B", "ref"),
+                ],
+                "b.py": [
+                    Tag("b.py", str(root / "b.py"), 1, "B", "def"),
+                    Tag("b.py", str(root / "b.py"), 1, "C", "ref"),
+                ],
+                "c.py": [
+                    Tag("c.py", str(root / "c.py"), 1, "C", "def"),
+                ],
+            }
+
+            repo_map = RepoMap(root=str(root), token_counter_func=lambda text: len(text.split()))
+            repo_map.get_tags = lambda fname, rel_fname: tags_by_name[Path(fname).name]
+
+            _, file_report = repo_map.get_ranked_tags_map_uncached(
+                [],
+                [str(root / "a.py"), str(root / "b.py"), str(root / "c.py")],
+                max_map_tokens=4096,
+            )
+
+            by_path = {entry.path: entry for entry in file_report.ranked_files}
+            self.assertEqual(file_report.selected_files, ["c.py", "b.py", "a.py"])
+            self.assertGreater(file_report.map_tokens, 0)
+            self.assertTrue(by_path["c.py"].included_in_map)
+            self.assertEqual(by_path["c.py"].inbound_neighbors, ["b.py"])
+            self.assertEqual(by_path["a.py"].outbound_neighbors, ["b.py"])
+            self.assertIn("referenced_by", {reason.code for reason in by_path["c.py"].reasons})
+            self.assertEqual(by_path["b.py"].sample_symbols, ["B"])
 
 
 class SearchIdentifierCacheTests(unittest.TestCase):
@@ -292,6 +331,52 @@ class CliPathResolutionTests(unittest.TestCase):
                         repomap.main()
 
             self.assertEqual([Path(path).name for path in captured["other_files"]], ["changed.py"])
+
+    def test_cli_can_emit_json_output_with_ranked_file_reasons(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            source_file = root / "app.py"
+            source_file.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+            fake_report = FileReport(
+                excluded={},
+                definition_matches=1,
+                reference_matches=0,
+                total_files_considered=1,
+                ranked_files=[
+                    RankedFile(
+                        path="app.py",
+                        rank=1.0,
+                        base_rank=1.0,
+                        included_in_map=True,
+                        definitions=1,
+                        sample_symbols=["foo"],
+                        reasons=[RankingReason("definitions", "Defines 1 symbol.")],
+                    )
+                ],
+                selected_files=["app.py"],
+                map_tokens=12,
+            )
+
+            def fake_get_repo_map(self, chat_files=None, other_files=None, **kwargs):
+                return "app.py:\n(Rank value: 1.0000)\n\n1: def foo():", fake_report
+
+            with mock.patch.object(repomap.RepoMap, "get_repo_map", new=fake_get_repo_map):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    ["repomap.py", "--root", str(root), "--output-format", "json", "app.py"],
+                ):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        repomap.main()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["report"]["selected_files"], ["app.py"])
+            self.assertEqual(payload["report"]["ranked_files"][0]["path"], "app.py")
+            self.assertEqual(payload["report"]["ranked_files"][0]["reasons"][0]["code"], "definitions")
+            self.assertEqual(stderr.getvalue(), "")
 
 
 class GitSupportTests(unittest.TestCase):
