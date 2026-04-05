@@ -167,6 +167,17 @@ def format_impact_report(report) -> str:
         if target.reasons:
             lines.append(f"Why: {target.reasons[0].message}")
 
+    if report.quick_actions:
+        lines.append("")
+        lines.append("Quick actions:")
+        for action in report.quick_actions:
+            lines.append(f"- [P{action.priority}] ({action.effort}) {action.kind} {action.target}: {action.message}")
+            if action.anchor_file and action.anchor_line:
+                anchor_suffix = f" ({action.anchor_kind} {action.anchor_symbol})" if action.anchor_symbol else ""
+                lines.append(f"  at {action.anchor_file}:{action.anchor_line}{anchor_suffix}")
+            if action.anchor_excerpt:
+                lines.extend(f"    {line}" for line in action.anchor_excerpt.splitlines()[:3])
+
     if report.suggested_checks:
         lines.append("")
         lines.append("Suggested checks:")

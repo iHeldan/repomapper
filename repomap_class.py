@@ -157,6 +157,22 @@ class ImpactSuggestion:
 
 
 @dataclass
+class ImpactQuickAction:
+    priority: int
+    kind: str
+    target: str
+    message: str
+    effort: str = "small"
+    seed_file: Optional[str] = None
+    path_from_seed: List[str] = field(default_factory=list)
+    anchor_file: Optional[str] = None
+    anchor_line: Optional[int] = None
+    anchor_symbol: Optional[str] = None
+    anchor_kind: Optional[str] = None
+    anchor_excerpt: Optional[str] = None
+
+
+@dataclass
 class ImpactLocation:
     file: str
     line: int
@@ -203,6 +219,7 @@ class ImpactReport:
     changed_hunks_by_file: Dict[str, List[ImpactHunk]] = field(default_factory=dict)
     changed_seed_symbols: Dict[str, List[str]] = field(default_factory=dict)
     shared_symbols: List[ImpactSymbol] = field(default_factory=list)
+    quick_actions: List[ImpactQuickAction] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -1487,6 +1504,7 @@ class RepoMap:
             report.changed_seed_symbols,
         )
         report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
+        report.quick_actions = self._build_impact_quick_actions(report.impacted_files, report.suggested_checks)
 
         diagnostics = list(self.diagnostics)
         if report.impacted_files:
@@ -1574,6 +1592,88 @@ class RepoMap:
             )
         )
         return symbols[:12]
+
+    def _build_impact_quick_actions(
+        self,
+        impacted_files: List[ImpactTarget],
+        suggested_checks: List[ImpactSuggestion],
+    ) -> List[ImpactQuickAction]:
+        """Build low-risk next actions from the broader impact checklist."""
+        quick_actions = []
+        seen = set()
+        impacted_by_path = {target.path: target for target in impacted_files}
+
+        def add_action(
+            suggestion: ImpactSuggestion,
+            *,
+            kind: str,
+            message: str,
+            priority: Optional[int] = None,
+            effort: str = "small",
+        ) -> None:
+            key = (kind, suggestion.target)
+            if key in seen:
+                return
+            seen.add(key)
+            quick_actions.append(
+                ImpactQuickAction(
+                    priority=suggestion.priority if priority is None else priority,
+                    kind=kind,
+                    target=suggestion.target,
+                    message=message,
+                    effort=effort,
+                    seed_file=suggestion.seed_file,
+                    path_from_seed=suggestion.path_from_seed[:],
+                    anchor_file=suggestion.anchor_file,
+                    anchor_line=suggestion.anchor_line,
+                    anchor_symbol=suggestion.anchor_symbol,
+                    anchor_kind=suggestion.anchor_kind,
+                    anchor_excerpt=suggestion.anchor_excerpt,
+                )
+            )
+
+        for suggestion in suggested_checks:
+            target = impacted_by_path.get(suggestion.target)
+            if suggestion.kind == "review_changed_symbol_boundary":
+                add_action(
+                    suggestion,
+                    kind="open_changed_boundary",
+                    message="Open this changed boundary first and verify the nearby symbol contract.",
+                    priority=0,
+                )
+            elif suggestion.kind == "review_test":
+                add_action(
+                    suggestion,
+                    kind="run_nearby_test",
+                    message="Run or inspect this nearby test before making broader edits.",
+                    priority=0 if target and target.distance == 1 else 1,
+                )
+            elif suggestion.kind == "review_config":
+                add_action(
+                    suggestion,
+                    kind="check_config_assumption",
+                    message="Verify this config assumption before changing deeper logic.",
+                    priority=1,
+                )
+            elif suggestion.kind == "inspect_neighbor" and target and target.distance == 1:
+                add_action(
+                    suggestion,
+                    kind="open_direct_neighbor",
+                    message="Open this one-hop neighbor at the anchored line first.",
+                    priority=2,
+                )
+
+        if not quick_actions and suggested_checks:
+            first = suggested_checks[0]
+            add_action(
+                first,
+                kind="start_here",
+                message="Start with the first anchored follow-up item.",
+                priority=first.priority,
+            )
+
+        quick_actions.sort(key=lambda item: (item.priority, len(item.path_from_seed), item.target))
+        return quick_actions[:6]
 
     def _build_impact_suggestions(
         self,

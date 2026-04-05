@@ -488,6 +488,13 @@ class RepoMapRankingTests(unittest.TestCase):
             suggestion_kinds = {suggestion.kind for suggestion in report.suggested_checks}
             self.assertIn("review_test", suggestion_kinds)
             self.assertIn("inspect_neighbor", suggestion_kinds)
+            quick_action_kinds = {action.kind for action in report.quick_actions}
+            self.assertIn("run_nearby_test", quick_action_kinds)
+            self.assertIn("open_direct_neighbor", quick_action_kinds)
+            first_action = report.quick_actions[0]
+            self.assertEqual(first_action.anchor_file, "tests/test_service.py")
+            self.assertEqual(first_action.anchor_line, 1)
+            self.assertEqual(first_action.effort, "small")
             first_suggestion = report.suggested_checks[0]
             self.assertEqual(first_suggestion.anchor_file, "tests/test_service.py")
             self.assertEqual(first_suggestion.anchor_line, 1)
@@ -542,6 +549,10 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(report.shared_symbols[0].name, "Service")
             self.assertTrue(report.shared_symbols[0].is_changed_seed_symbol)
             self.assertEqual(report.shared_symbols[0].closest_changed_hunk_distance, 0)
+            self.assertEqual(report.quick_actions[0].kind, "open_changed_boundary")
+            self.assertEqual(report.quick_actions[0].anchor_file, "service.py")
+            self.assertEqual(report.quick_actions[0].anchor_line, 1)
+            self.assertEqual(report.quick_actions[0].anchor_symbol, "Service")
             self.assertEqual(report.suggested_checks[0].kind, "review_changed_symbol_boundary")
             self.assertEqual(report.suggested_checks[0].anchor_file, "service.py")
             self.assertEqual(report.suggested_checks[0].anchor_line, 1)
@@ -989,6 +1000,21 @@ class CliPathResolutionTests(unittest.TestCase):
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
+                    quick_actions=[
+                        repomap_class.ImpactQuickAction(
+                            priority=0,
+                            kind="open_changed_boundary",
+                            target="service.py",
+                            message="Open this changed boundary first and verify the nearby symbol contract.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "service.py"],
+                            anchor_file="service.py",
+                            anchor_line=1,
+                            anchor_symbol="Service",
+                            anchor_kind="def",
+                            anchor_excerpt="1: class Service:\n2:     pass",
+                        )
+                    ],
                     suggested_checks=[
                         repomap_class.ImpactSuggestion(
                             priority=1,
@@ -1050,6 +1076,10 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertTrue(payload["shared_symbols"][0]["is_changed_seed_symbol"])
             self.assertEqual(payload["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(payload["shared_symbols"][0]["locations"][0]["symbol"], "Service")
+            self.assertEqual(payload["quick_actions"][0]["kind"], "open_changed_boundary")
+            self.assertEqual(payload["quick_actions"][0]["anchor_file"], "service.py")
+            self.assertEqual(payload["quick_actions"][0]["anchor_line"], 1)
+            self.assertIn("class Service", payload["quick_actions"][0]["anchor_excerpt"])
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(payload["suggested_checks"][0]["anchor_line"], 1)
@@ -1265,6 +1295,21 @@ class RepoMapServerTests(unittest.TestCase):
                             locations=[repomap_class.ImpactLocation("service.py", 1, "def", "Service")],
                         )
                     ],
+                    quick_actions=[
+                        repomap_class.ImpactQuickAction(
+                            priority=0,
+                            kind="run_nearby_test",
+                            target="tests/test_app.py",
+                            message="Run or inspect this nearby test before making broader edits.",
+                            seed_file="app.py",
+                            path_from_seed=["app.py", "tests/test_app.py"],
+                            anchor_file="service.py",
+                            anchor_line=1,
+                            anchor_symbol="Service",
+                            anchor_kind="def",
+                            anchor_excerpt="1: class Service:\n2:     pass",
+                        )
+                    ],
                     suggested_checks=[
                         repomap_class.ImpactSuggestion(
                             priority=0,
@@ -1310,6 +1355,10 @@ class RepoMapServerTests(unittest.TestCase):
             self.assertTrue(result["shared_symbols"][0]["is_changed_seed_symbol"])
             self.assertEqual(result["shared_symbols"][0]["closest_changed_hunk_distance"], 0)
             self.assertEqual(result["shared_symbols"][0]["locations"][0]["kind"], "def")
+            self.assertEqual(result["quick_actions"][0]["kind"], "run_nearby_test")
+            self.assertEqual(result["quick_actions"][0]["anchor_file"], "service.py")
+            self.assertEqual(result["quick_actions"][0]["anchor_line"], 1)
+            self.assertIn("class Service", result["quick_actions"][0]["anchor_excerpt"])
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["suggested_checks"][0]["anchor_file"], "service.py")
             self.assertEqual(result["suggested_checks"][0]["anchor_line"], 1)
