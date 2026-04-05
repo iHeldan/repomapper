@@ -459,12 +459,17 @@ class RepoMapRankingTests(unittest.TestCase):
             self.assertEqual(by_path["service.py"].distance, 1)
             self.assertEqual(by_path["service.py"].path_from_seed, ["app.py", "service.py"])
             self.assertEqual(by_path["service.py"].steps[0].relation, "references")
+            self.assertEqual(by_path["service.py"].boundary_symbols, ["Service"])
+            self.assertEqual(by_path["service.py"].boundary_relations, ["references"])
             self.assertIn("impact_path", {reason.code for reason in by_path["service.py"].reasons})
             self.assertIn("db.py", by_path)
             self.assertEqual(by_path["db.py"].path_from_seed, ["app.py", "service.py", "db.py"])
+            self.assertEqual(by_path["db.py"].boundary_symbols, ["Service", "db_query"])
             self.assertIn("tests/test_service.py", by_path)
             self.assertTrue(by_path["tests/test_service.py"].is_test_file)
             self.assertIn("impact_test", {reason.code for reason in by_path["tests/test_service.py"].reasons})
+            self.assertEqual(report.shared_symbols[0].name, "Service")
+            self.assertIn("service.py", report.shared_symbols[0].target_files)
             suggestion_kinds = {suggestion.kind for suggestion in report.suggested_checks}
             self.assertIn("review_test", suggestion_kinds)
             self.assertIn("inspect_neighbor", suggestion_kinds)
@@ -833,7 +838,18 @@ class CliPathResolutionTests(unittest.TestCase):
                             distance=1,
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            boundary_symbols=["Service"],
+                            boundary_relations=["references"],
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
+                        )
+                    ],
+                    shared_symbols=[
+                        repomap_class.ImpactSymbol(
+                            name="Service",
+                            target_files=["service.py"],
+                            seed_files=["app.py"],
+                            target_count=1,
+                            closest_distance=1,
                         )
                     ],
                     suggested_checks=[
@@ -878,6 +894,8 @@ class CliPathResolutionTests(unittest.TestCase):
             self.assertEqual(captured["max_results"], 5)
             self.assertEqual(payload["seed_files"], ["app.py"])
             self.assertEqual(payload["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(payload["impacted_files"][0]["boundary_symbols"], ["Service"])
+            self.assertEqual(payload["shared_symbols"][0]["name"], "Service")
             self.assertEqual(payload["suggested_checks"][0]["kind"], "review_public_api")
             self.assertEqual(payload["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(stderr.getvalue(), "")
@@ -903,6 +921,7 @@ class CliPathResolutionTests(unittest.TestCase):
                     max_depth=max_depth,
                     max_results=max_results,
                     impacted_files=[],
+                    shared_symbols=[],
                     suggested_checks=[],
                     diagnostics=["No impacted files."],
                 )
@@ -1051,7 +1070,18 @@ class RepoMapServerTests(unittest.TestCase):
                             distance=1,
                             path_from_seed=["app.py", "service.py"],
                             steps=[repomap_class.ConnectionStep("app.py", "service.py", "references", ["Service"])],
+                            boundary_symbols=["Service"],
+                            boundary_relations=["references"],
                             reasons=[RankingReason("impact_path", "Reachable from app.py in 1 hop.")],
+                        )
+                    ],
+                    shared_symbols=[
+                        repomap_class.ImpactSymbol(
+                            name="Service",
+                            target_files=["service.py"],
+                            seed_files=["app.py"],
+                            target_count=1,
+                            closest_distance=1,
                         )
                     ],
                     suggested_checks=[
@@ -1081,6 +1111,8 @@ class RepoMapServerTests(unittest.TestCase):
 
             self.assertEqual(result["seed_files"], ["app.py"])
             self.assertEqual(result["impacted_files"][0]["path"], "service.py")
+            self.assertEqual(result["impacted_files"][0]["boundary_symbols"], ["Service"])
+            self.assertEqual(result["shared_symbols"][0]["name"], "Service")
             self.assertEqual(result["suggested_checks"][0]["kind"], "review_test")
             self.assertEqual(result["impacted_files"][0]["steps"][0]["relation"], "references")
             self.assertEqual(result["diagnostics"], ["Found 1 impacted file."])
@@ -1103,6 +1135,7 @@ class RepoMapServerTests(unittest.TestCase):
                     max_depth=max_depth,
                     max_results=max_results,
                     impacted_files=[],
+                    shared_symbols=[],
                     suggested_checks=[],
                     diagnostics=["Found changed impact context."],
                 )

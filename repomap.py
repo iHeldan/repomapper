@@ -116,6 +116,10 @@ def format_impact_report(report) -> str:
         lines.append("")
         lines.append(f"{target.path} (distance {target.distance}, from {target.seed_file})")
         lines.append(f"Path: {' -> '.join(target.path_from_seed)}")
+        if target.boundary_symbols:
+            lines.append(f"Boundary symbols: {', '.join(target.boundary_symbols[:5])}")
+        if target.boundary_relations:
+            lines.append(f"Boundary relations: {', '.join(target.boundary_relations[:4])}")
         if target.steps:
             relation_chunks = []
             for step in target.steps:
@@ -133,6 +137,15 @@ def format_impact_report(report) -> str:
         lines.append("Suggested checks:")
         for suggestion in report.suggested_checks:
             lines.append(f"- [P{suggestion.priority}] {suggestion.kind} {suggestion.target}: {suggestion.message}")
+
+    if report.shared_symbols:
+        lines.append("")
+        lines.append("Shared symbols:")
+        for symbol in report.shared_symbols[:8]:
+            distance_suffix = f", closest hop {symbol.closest_distance}" if symbol.closest_distance is not None else ""
+            lines.append(
+                f"- {symbol.name}: {symbol.target_count} target(s){distance_suffix} -> {', '.join(symbol.target_files[:4])}"
+            )
 
     if report.diagnostics:
         lines.append("")

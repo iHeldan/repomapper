@@ -122,6 +122,8 @@ class ImpactTarget:
     distance: int
     path_from_seed: List[str] = field(default_factory=list)
     steps: List[ConnectionStep] = field(default_factory=list)
+    boundary_symbols: List[str] = field(default_factory=list)
+    boundary_relations: List[str] = field(default_factory=list)
     is_test_file: bool = False
     is_entrypoint_file: bool = False
     is_public_api_file: bool = False
@@ -142,11 +144,21 @@ class ImpactSuggestion:
 
 
 @dataclass
+class ImpactSymbol:
+    name: str
+    target_files: List[str] = field(default_factory=list)
+    seed_files: List[str] = field(default_factory=list)
+    target_count: int = 0
+    closest_distance: Optional[int] = None
+
+
+@dataclass
 class ImpactReport:
     seed_files: List[str]
     max_depth: int
     max_results: int
     impacted_files: List[ImpactTarget] = field(default_factory=list)
+    shared_symbols: List[ImpactSymbol] = field(default_factory=list)
     suggested_checks: List[ImpactSuggestion] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -937,6 +949,17 @@ class RepoMap:
             diagnostics=diagnostics,
         )
 
+    def _extract_boundary_symbols(self, steps: List[ConnectionStep]) -> List[str]:
+        """Collect the concrete non-synthetic symbols that connect an impact path."""
+        symbols = []
+        for step in steps:
+            for symbol in step.symbols:
+                if symbol.startswith("__related_"):
+                    continue
+                if symbol not in symbols:
+                    symbols.append(symbol)
+        return symbols[:8]
+
     def _build_connection_steps(
         self,
         path: List[str],
@@ -1059,6 +1082,11 @@ class RepoMap:
                 continue
 
             steps = self._build_connection_steps(path, graph, edge_symbols)
+            boundary_symbols = self._extract_boundary_symbols(steps)
+            boundary_relations = []
+            for step in steps:
+                if step.relation not in boundary_relations:
+                    boundary_relations.append(step.relation)
             is_test_file = self._is_test_file(target_rel)
             entrypoint_signals, public_api_signals = self._get_path_role_signals(target_rel)
             is_entrypoint_file = bool(entrypoint_signals)
@@ -1136,6 +1164,8 @@ class RepoMap:
                     distance=distance,
                     path_from_seed=path,
                     steps=steps,
+                    boundary_symbols=boundary_symbols,
+                    boundary_relations=boundary_relations[:5],
                     is_test_file=is_test_file,
                     is_entrypoint_file=is_entrypoint_file,
                     is_public_api_file=is_public_api_file,
@@ -1160,6 +1190,7 @@ class RepoMap:
             )
         )
         report.impacted_files = impacted_files[:max_results]
+        report.shared_symbols = self._build_impact_symbols(report.impacted_files)
         report.suggested_checks = self._build_impact_suggestions(seed_rel_files, report.impacted_files)
 
         diagnostics = list(self.diagnostics)
@@ -1173,6 +1204,41 @@ class RepoMap:
             )
         report.diagnostics = diagnostics
         return report
+
+    def _build_impact_symbols(self, impacted_files: List[ImpactTarget]) -> List[ImpactSymbol]:
+        """Aggregate the shared symbols that most often define impact boundaries."""
+        by_symbol = {}
+        for target in impacted_files:
+            for symbol in target.boundary_symbols:
+                entry = by_symbol.setdefault(
+                    symbol,
+                    {
+                        "target_files": [],
+                        "seed_files": [],
+                        "closest_distance": None,
+                    },
+                )
+                if target.path not in entry["target_files"]:
+                    entry["target_files"].append(target.path)
+                if target.seed_file not in entry["seed_files"]:
+                    entry["seed_files"].append(target.seed_file)
+                if entry["closest_distance"] is None or target.distance < entry["closest_distance"]:
+                    entry["closest_distance"] = target.distance
+
+        symbols = []
+        for name, data in by_symbol.items():
+            symbols.append(
+                ImpactSymbol(
+                    name=name,
+                    target_files=sorted(data["target_files"]),
+                    seed_files=sorted(data["seed_files"]),
+                    target_count=len(data["target_files"]),
+                    closest_distance=data["closest_distance"],
+                )
+            )
+
+        symbols.sort(key=lambda item: (-item.target_count, item.closest_distance or 99, item.name.lower()))
+        return symbols[:12]
 
     def _build_impact_suggestions(
         self,
@@ -1262,17 +1328,12 @@ class RepoMap:
                     path_from_seed=target.path_from_seed,
                 )
             if target.steps and any(step.symbols for step in target.steps):
-                symbol_names = [
-                    symbol
-                    for step in target.steps
-                    for symbol in step.symbols[:2]
-                ]
-                if symbol_names:
+                if target.boundary_symbols:
                     add_suggestion(
                         2,
                         "follow_symbols",
                         target.path,
-                        f"Trace shared symbols such as {', '.join(symbol_names[:3])}.",
+                        f"Trace shared symbols such as {', '.join(target.boundary_symbols[:3])}.",
                         seed_file=target.seed_file,
                         path_from_seed=target.path_from_seed,
                     )
